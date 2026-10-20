@@ -6,12 +6,6 @@
 
 > 需求版本（V1.0 / V2.0 …）贯穿全链路：不同期需求文档对应不同测试用例，支持按版本筛选、隔离、回看历史。
 
-## 截图
-
-| 总览看板 | 需求版本 + 测试点 | AI 截图审核报告 |
-|---|---|---|
-| ![dashboard](docs/images/dashboard.png) | ![requirements](docs/images/requirements.png) | ![review](docs/images/review-report.png) |
-
 ## 核心能力
 
 ### 1. 代码静态分析（纯规则）
@@ -142,7 +136,7 @@ frontend/         Vue 3 前端
 scripts/          demo_site(演示靶站) / sample_src(样本源码) / e2e.py / analyze_cli.py / gen_mysql_ddl.py
 tests/            后端测试
 migrations/mysql/ MySQL DDL（由 scripts/gen_mysql_ddl.py 生成）
-docs/             任务书 / 计划 / 迭代记录 / 截图
+docs/             任务书 / 计划 / 迭代记录
 main.py           便捷入口
 ```
 
