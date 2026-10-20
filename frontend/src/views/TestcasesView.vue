@@ -1,0 +1,644 @@
+<template>
+  <div class="page-layout">
+    <ProjectSidebar v-if="showSidebar" />
+
+    <div class="page-content">
+    <el-empty v-if="!projectId" description="请在左侧选择项目，或到「项目列表」进入项目">
+      <el-button type="primary" @click="$router.push('/projects')">去项目列表</el-button>
+    </el-empty>
+
+    <template v-else>
+      <!-- 筛选栏 -->
+      <div class="filter-bar">
+        <div class="filters">
+          <el-select v-model="filters.requirementId" placeholder="全部需求版本" clearable style="width: 160px" @change="onRequirementChange">
+            <el-option v-for="r in requirements" :key="r.id" :label="`${r.version} · ${r.name}`" :value="r.id" />
+            <el-option label="未关联版本" value="__none__" />
+          </el-select>
+          <el-tag v-if="isLatestVersion" size="small" type="success" effect="plain">最新</el-tag>
+          <el-select v-model="filters.type" placeholder="类型" clearable style="width: 120px" @change="applyFilter">
+            <el-option v-for="t in TYPES" :key="t.v" :label="t.l" :value="t.v" />
+          </el-select>
+          <el-select v-model="filters.priority" placeholder="优先级" clearable style="width: 110px" @change="applyFilter">
+            <el-option v-for="p in ['P0', 'P1', 'P2']" :key="p" :label="p" :value="p" />
+          </el-select>
+          <el-select v-model="filters.executionStatus" placeholder="执行状态" clearable style="width: 130px" @change="applyFilter">
+            <el-option v-for="s in STATUS" :key="s.v" :label="s.l" :value="s.v" />
+          </el-select>
+          <el-input
+            v-model="filters.keyword"
+            placeholder="标题关键词"
+            clearable
+            style="width: 200px"
+            @keyup.enter="applyFilter"
+            @clear="applyFilter"
+          />
+          <el-button type="primary" @click="applyFilter">查询</el-button>
+        </div>
+        <div class="actions">
+          <el-button :loading="loading" title="刷新" @click="load">
+            <el-icon><Refresh /></el-icon>
+          </el-button>
+          <el-upload :show-file-list="false" accept=".csv" :before-upload="onImport" :disabled="importing">
+            <el-button :loading="importing">导入 CSV</el-button>
+          </el-upload>
+          <el-button :loading="exporting" @click="onExport">导出 CSV</el-button>
+          <el-button type="success" :loading="batchExecuting" @click="onExecuteAll">全部执行</el-button>
+          <el-button v-if="selection.length" type="primary" :loading="batchExecuting" @click="onBatchExecute">
+            批量执行({{ selection.length }})
+          </el-button>
+          <el-button v-if="selection.length" type="danger" @click="onBatchDelete">批量删除({{ selection.length }})</el-button>
+        </div>
+      </div>
+
+      <el-table
+        ref="tableRef"
+        :data="rows"
+        border
+        stripe
+        row-key="id"
+        v-loading="loading"
+        :empty-text="emptyText"
+        @selection-change="(v) => (selection = v)"
+      >
+        <el-table-column v-if="!isNarrow" type="selection" width="45" />
+        <el-table-column prop="projectSeq" label="#" width="55" />
+        <el-table-column v-if="!isNarrow" label="需求版本" width="110">
+          <template #default="{ row }">
+            <el-tag v-if="row.requirementId" size="small" effect="plain">{{ requirementLabel(row.requirementId) }}</el-tag>
+            <span v-else class="muted">—</span>
+          </template>
+        </el-table-column>
+        <el-table-column prop="title" label="标题" min-width="200" show-overflow-tooltip />
+        <el-table-column v-if="!isNarrow" label="类型" width="80">
+          <template #default="{ row }"><el-tag size="small" :type="typeTag(row.type)">{{ typeLabel(row.type) }}</el-tag></template>
+        </el-table-column>
+        <el-table-column prop="priority" label="优先级" width="76" />
+        <el-table-column v-if="!isNarrow" label="质量分" width="80">
+          <template #default="{ row }">
+            <el-tag
+              size="small"
+              :type="row.qualityScore >= 80 ? 'success' : row.qualityScore >= 40 ? 'warning' : 'danger'"
+            >{{ row.qualityScore }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="执行状态" width="90">
+          <template #default="{ row }">
+            <el-tag size="small" :type="execTag(row.executionStatus)">{{ execLabel(row.executionStatus) }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" :width="isNarrow ? 155 : 210" :fixed="isNarrow ? false : 'right'">
+          <template #default="{ row }">
+            <el-button link type="success" :loading="executingId === row.id" @click="onExecute(row)">执行</el-button>
+            <el-button link type="primary" @click="openEdit(row)">编辑</el-button>
+            <el-button v-if="!isNarrow" link @click="openVersions(row)">版本</el-button>
+            <el-button link type="danger" @click="onDelete(row)">删除</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+
+      <el-pagination
+        v-model:current-page="page"
+        v-model:page-size="pageSize"
+        :total="total"
+        :page-sizes="[10, 20, 50, 100]"
+        layout="total, sizes, prev, pager, next"
+        class="pager"
+        @current-change="load"
+        @size-change="onSizeChange"
+      />
+
+      <!-- 编辑抽屉 -->
+      <el-drawer v-model="editVisible" title="编辑用例" size="760px" :close-on-click-modal="false">
+        <el-form label-width="90px">
+          <el-form-item label="标题" required>
+            <el-input v-model="edit.title" maxlength="200" show-word-limit />
+          </el-form-item>
+          <el-row :gutter="12">
+            <el-col :span="12">
+              <el-form-item label="模块"><el-input v-model="edit.module" /></el-form-item>
+            </el-col>
+            <el-col :span="12">
+              <el-form-item label="类型">
+                <el-select v-model="edit.type" style="width: 100%">
+                  <el-option v-for="t in TYPES" :key="t.v" :label="t.l" :value="t.v" />
+                </el-select>
+              </el-form-item>
+            </el-col>
+          </el-row>
+          <el-form-item label="优先级">
+            <el-radio-group v-model="edit.priority">
+              <el-radio v-for="p in ['P0', 'P1', 'P2']" :key="p" :value="p">{{ p }}</el-radio>
+            </el-radio-group>
+          </el-form-item>
+          <el-form-item label="前置条件">
+            <el-input v-model="edit.preconditionsText" type="textarea" :rows="2" placeholder="一行一条" />
+          </el-form-item>
+          <el-form-item label="预期结果">
+            <el-input v-model="edit.expectedText" type="textarea" :rows="2" placeholder="一行一条" />
+          </el-form-item>
+
+          <el-divider content-position="left">结构化步骤（执行器消费）</el-divider>
+          <el-empty v-if="!edit.structuredSteps.length" description="暂无结构化步骤" :image-size="60" />
+          <div v-for="(s, i) in edit.structuredSteps" :key="i" class="step-item">
+            <div class="step-head">
+              <span class="step-no">#{{ i + 1 }}</span>
+              <el-select v-model="s.type" size="small" style="width: 120px">
+                <el-option label="点击" value="ui_action" />
+                <el-option label="输入" value="input" />
+                <el-option label="断言" value="state_assert" />
+              </el-select>
+              <el-input v-model="s.action" placeholder="动作（如 点击登录按钮）" size="small" class="grow" />
+              <el-button link type="primary" :disabled="i === 0" @click="moveStep(i, -1)">上移</el-button>
+              <el-button link type="primary" :disabled="i === edit.structuredSteps.length - 1" @click="moveStep(i, 1)">下移</el-button>
+              <el-button link type="danger" @click="removeStep(i)">删除</el-button>
+            </div>
+            <div class="step-body">
+              <el-input v-model="s.target" placeholder="目标" size="small" style="width: 160px" />
+              <el-select v-model="s.uiSelector.type" size="small" style="width: 120px">
+                <el-option v-for="st in SELECTOR_TYPES" :key="st" :label="st" :value="st" />
+              </el-select>
+              <el-input v-model="s.uiSelector.value" placeholder="定位值" size="small" style="width: 180px" />
+              <el-input v-if="s.type === 'input'" v-model="s.inputValue" placeholder="输入值" size="small" style="width: 160px" />
+              <el-input v-if="s.type === 'state_assert'" v-model="s.expected" placeholder="断言文本" size="small" style="width: 200px" />
+            </div>
+          </div>
+          <el-button size="small" @click="addStep">+ 添加步骤</el-button>
+        </el-form>
+
+        <template #footer>
+          <el-button @click="editVisible = false">取消</el-button>
+          <el-button type="primary" :loading="saving" @click="saveEdit">保存</el-button>
+        </template>
+      </el-drawer>
+
+      <!-- 版本对话框 -->
+      <el-dialog v-model="versionVisible" title="版本历史" width="600px">
+        <el-table :data="versions" size="small" border :empty-text="versionsLoading ? '加载中...' : '暂无版本记录'">
+          <el-table-column prop="version" label="版本" width="70" />
+          <el-table-column prop="changeNote" label="说明" show-overflow-tooltip />
+          <el-table-column prop="createdAt" label="时间" width="170">
+            <template #default="{ row }">{{ row.createdAt ? new Date(row.createdAt).toLocaleString() : '—' }}</template>
+          </el-table-column>
+          <el-table-column label="操作" width="90">
+            <template #default="{ row }">
+              <el-button link type="primary" @click="onRollback(row)">回滚</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+      </el-dialog>
+    </template>
+    </div>
+  </div>
+</template>
+
+<script setup>
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import {
+  batchDelete, deleteTestcase, exportCsv, importCsv, listTestcases, listVersions, rollbackVersion, updateTestcase,
+} from '../api/testcases'
+import { batchExecute, executeCase } from '../api/executions'
+import { listRequirements } from '../api/requirements'
+import ProjectSidebar from '../components/ProjectSidebar.vue'
+import { useConfigStore } from '../stores/config'
+
+// 独立页面不传 projectId，读全局；嵌入项目详情页时以路由项目为准
+const props = defineProps({
+  projectId: { type: String, default: null },
+  refreshKey: { type: Number, default: 0 },
+})
+const store = useConfigStore()
+const projectId = computed(() => props.projectId || store.currentProjectId)
+// 嵌入项目详情页时不显示项目侧边栏
+const showSidebar = computed(() => !props.projectId)
+
+const executingId = ref('')
+const batchExecuting = ref(false)
+const importing = ref(false)
+const exporting = ref(false)
+
+const TYPES = [
+  { v: 'positive', l: '正例' }, { v: 'negative', l: '反例' },
+  { v: 'boundary', l: '边界' }, { v: 'state', l: '流转' },
+]
+const STATUS = [
+  { v: 'not_run', l: '未执行' }, { v: 'passed', l: '通过' },
+  { v: 'failed', l: '失败' }, { v: 'skipped', l: '跳过' },
+]
+const SELECTOR_TYPES = ['route', 'placeholder', 'text', 'label', 'role', 'css', 'xpath', 'testid']
+const EXEC_TEXT = {
+  not_run: '未执行',
+  passed: '通过',
+  failed: '失败',
+  skipped: '跳过',
+  running: '执行中',
+  needs_review: '待复核',
+}
+
+const tableRef = ref()
+const rows = ref([])
+const loading = ref(false)
+const page = ref(1)
+const pageSize = ref(20)
+const total = ref(0)
+const selection = ref([])
+const requirements = ref([])
+const filters = reactive({ requirementId: '', type: '', priority: '', executionStatus: '', keyword: '' })
+const requirementMap = computed(() => Object.fromEntries(requirements.value.map((r) => [r.id, r])))
+// 用户是否手动改过版本筛选；未改过时始终跟随最新版本
+const versionTouched = ref(false)
+const latestRequirementId = computed(() =>
+  requirements.value.length ? requirements.value[requirements.value.length - 1].id : null,
+)
+const isLatestVersion = computed(
+  () => !!filters.requirementId && filters.requirementId === latestRequirementId.value,
+)
+
+const emptyText = computed(() => {
+  if (loading.value) return '加载中...'
+  if (filters.requirementId === '__none__') return '没有未关联需求版本的用例'
+  if (filters.requirementId) {
+    const r = requirementMap.value[filters.requirementId]
+    return r ? `${r.version} 暂无测试用例` : '该需求版本暂无测试用例'
+  }
+  return '暂无用例，可先到「项目详情 → 用例生成」生成'
+})
+
+const editVisible = ref(false)
+const saving = ref(false)
+const edit = reactive({ structuredSteps: [] })
+const versionVisible = ref(false)
+const versions = ref([])
+const versionsLoading = ref(false)
+const versionCaseId = ref('')
+
+const queryParams = () => ({
+  page: page.value,
+  pageSize: pageSize.value,
+  requirementId: filters.requirementId || undefined,
+  type: filters.type || undefined,
+  priority: filters.priority || undefined,
+  executionStatus: filters.executionStatus || undefined,
+  keyword: filters.keyword || undefined,
+})
+
+function requirementLabel(id) {
+  const r = requirementMap.value[id]
+  return r ? r.version : id
+}
+
+async function loadRequirements() {
+  if (!projectId.value) return
+  try {
+    requirements.value = await listRequirements(projectId.value)
+  } catch {
+    requirements.value = []
+  }
+  // 默认展示最新一期需求版本的用例；用户手动切换后不再覆盖
+  if (!versionTouched.value) {
+    const latest = requirements.value[requirements.value.length - 1]
+    filters.requirementId = latest ? latest.id : ''
+  }
+}
+
+function onRequirementChange() {
+  versionTouched.value = true
+  applyFilter()
+}
+
+async function load() {
+  if (!projectId.value) return
+  loading.value = true
+  try {
+    const data = await listTestcases(projectId.value, queryParams())
+    rows.value = data.items || []
+    total.value = data.total || 0
+  } finally {
+    loading.value = false
+  }
+}
+
+function applyFilter() {
+  page.value = 1
+  load()
+}
+
+function onSizeChange() {
+  page.value = 1
+  load()
+}
+
+async function onExecute(row) {
+  executingId.value = row.id
+  try {
+    const r = await executeCase(projectId.value, row.id)
+    const text = EXEC_TEXT[r.status] || r.status
+    const summary = `执行完成：${text}（${r.passedSteps}/${r.totalSteps} 步通过）`
+    if (r.status === 'passed') {
+      ElMessage.success(summary)
+    } else if (r.status === 'needs_review') {
+      ElMessage.warning(`${summary}，AI 判定有异常，请到执行结果中人工复核`)
+    } else {
+      ElMessage.warning(summary)
+    }
+    await load()
+  } finally {
+    executingId.value = ''
+  }
+}
+
+async function onBatchExecute() {
+  if (!selection.value.length) return ElMessage.warning('请先勾选用例')
+  batchExecuting.value = true
+  try {
+    const r = await batchExecute(projectId.value, selection.value.map((s) => s.id))
+    ElMessage.success(`已提交批量执行，批次 ${r.batchId}，可到「执行结果」查看进度`)
+  } finally {
+    batchExecuting.value = false
+  }
+}
+
+async function onExecuteAll() {
+  if (!projectId.value) return
+  batchExecuting.value = true
+  try {
+    // 拉取当前筛选条件下的所有用例（最多 200 条）
+    const data = await listTestcases(projectId.value, {
+      ...queryParams(),
+      page: 1,
+      pageSize: 200,
+    })
+    const ids = (data.items || []).map((t) => t.id)
+    if (!ids.length) return ElMessage.warning('没有可执行的用例')
+    if (ids.length > 100) return ElMessage.warning('单批上限 100 条，请用筛选缩小范围或分批执行')
+    const r = await batchExecute(projectId.value, ids)
+    ElMessage.success(`已提交全部执行（${ids.length} 条），批次 ${r.batchId}，可到「执行结果」查看进度`)
+  } finally {
+    batchExecuting.value = false
+  }
+}
+
+function openEdit(row) {
+  const copy = JSON.parse(JSON.stringify(row))
+  Object.assign(edit, copy)
+  edit.preconditionsText = (row.preconditions || []).join('\n')
+  edit.expectedText = (row.expectedResults || []).join('\n')
+  edit.structuredSteps = (copy.structuredSteps || []).map((s) => ({
+    ...s,
+    uiSelector: s.uiSelector || { type: 'text', value: '' },
+  }))
+  editVisible.value = true
+}
+
+function addStep() {
+  edit.structuredSteps.push({
+    order: edit.structuredSteps.length + 1,
+    type: 'ui_action',
+    action: '',
+    target: '',
+    uiSelector: { type: 'text', value: '' },
+    expected: '',
+    inputValue: '',
+  })
+}
+
+function removeStep(i) {
+  edit.structuredSteps.splice(i, 1)
+}
+
+function moveStep(i, d) {
+  const arr = edit.structuredSteps
+  const j = i + d
+  if (j < 0 || j >= arr.length) return
+  ;[arr[i], arr[j]] = [arr[j], arr[i]]
+}
+
+async function saveEdit() {
+  if (!edit.title?.trim()) return ElMessage.warning('请填写用例标题')
+  if (!edit.structuredSteps.length) return ElMessage.warning('结构化步骤不能为空')
+  const invalid = edit.structuredSteps.find(
+    (s) => s.type !== 'state_assert' && !s.uiSelector?.value?.trim(),
+  )
+  if (invalid) return ElMessage.warning(`步骤 #${edit.structuredSteps.indexOf(invalid) + 1} 缺少定位值`)
+
+  saving.value = true
+  try {
+    edit.structuredSteps.forEach((s, i) => (s.order = i + 1))
+    await updateTestcase(projectId.value, edit.id, {
+      title: edit.title.trim(),
+      module: edit.module,
+      type: edit.type,
+      priority: edit.priority,
+      preconditions: (edit.preconditionsText || '').split('\n').map((s) => s.trim()).filter(Boolean),
+      expectedResults: (edit.expectedText || '').split('\n').map((s) => s.trim()).filter(Boolean),
+      structuredSteps: edit.structuredSteps,
+    })
+    ElMessage.success('已保存')
+    editVisible.value = false
+    await load()
+  } finally {
+    saving.value = false
+  }
+}
+
+async function openVersions(row) {
+  versionCaseId.value = row.id
+  versionVisible.value = true
+  versionsLoading.value = true
+  try {
+    versions.value = await listVersions(projectId.value, row.id)
+  } finally {
+    versionsLoading.value = false
+  }
+}
+
+async function confirmAction(message, title = '确认操作') {
+  try {
+    await ElMessageBox.confirm(message, title, { type: 'warning' })
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function onRollback(v) {
+  if (!(await confirmAction(`回滚到版本 ${v.version}？回滚后当前内容会被覆盖。`, '确认回滚'))) return
+  await rollbackVersion(projectId.value, versionCaseId.value, v.id)
+  ElMessage.success('已回滚')
+  versionVisible.value = false
+  await load()
+}
+
+async function onDelete(row) {
+  if (!(await confirmAction(`删除「${row.title}」？`, '确认删除'))) return
+  await deleteTestcase(projectId.value, row.id)
+  ElMessage.success('已删除')
+  if (rows.value.length === 1 && page.value > 1) page.value -= 1
+  await load()
+}
+
+async function onBatchDelete() {
+  if (!selection.value.length) return
+  const count = selection.value.length
+  if (!(await confirmAction(`删除选中的 ${count} 条用例？`, '确认删除'))) return
+  await batchDelete(projectId.value, selection.value.map((s) => s.id))
+  ElMessage.success('已删除')
+  selection.value = []
+  if (count >= rows.value.length && page.value > 1) page.value -= 1
+  await load()
+}
+
+async function onExport() {
+  exporting.value = true
+  try {
+    const blob = await exportCsv(projectId.value)
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = 'testcases.csv'
+    a.click()
+    URL.revokeObjectURL(url)
+  } finally {
+    exporting.value = false
+  }
+}
+
+async function onImport(file) {
+  importing.value = true
+  try {
+    const r = await importCsv(projectId.value, file)
+    ElMessage.success(`导入成功${r?.imported != null ? `：${r.imported} 条` : ''}`)
+    await load()
+  } finally {
+    importing.value = false
+  }
+  return false
+}
+
+function typeTag(t) {
+  return { positive: 'success', negative: 'danger', boundary: 'warning', state: 'primary' }[t] || 'info'
+}
+function typeLabel(t) {
+  return { positive: '正例', negative: '反例', boundary: '边界', state: '流转' }[t] || t
+}
+function execTag(s) {
+  return {
+    passed: 'success',
+    failed: 'danger',
+    skipped: 'warning',
+    not_run: 'info',
+    running: 'primary',
+    needs_review: 'warning',
+  }[s] || 'info'
+}
+function execLabel(s) {
+  return EXEC_TEXT[s] || s
+}
+
+const isNarrow = ref(false)
+const narrowMq = window.matchMedia('(max-width: 900px)')
+function onNarrowChange(e) {
+  isNarrow.value = e.matches
+}
+
+onMounted(async () => {
+  isNarrow.value = narrowMq.matches
+  narrowMq.addEventListener('change', onNarrowChange)
+  // 先确定默认版本，再拉用例，避免先闪一次“全部版本”
+  await loadRequirements()
+  load()
+})
+onBeforeUnmount(() => narrowMq.removeEventListener('change', onNarrowChange))
+watch(projectId, async () => {
+  page.value = 1
+  selection.value = []
+  versionTouched.value = false
+  filters.requirementId = ''
+  await loadRequirements()
+  load()
+})
+// 进入页面 / 生成完成后由父组件触发刷新（顺手刷新版本筛选项）
+watch(() => props.refreshKey, async () => {
+  await loadRequirements()
+  load()
+})
+</script>
+
+<style scoped>
+.page-layout {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+}
+.page-content {
+  flex: 1;
+  min-width: 0;
+}
+.filter-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.filters,
+.actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.actions {
+  margin-left: auto;
+}
+.pager {
+  margin-top: 12px;
+  justify-content: flex-end;
+}
+@media (max-width: 900px) {
+  .page-layout {
+    flex-direction: column;
+    width: 100%;
+  }
+  .page-content {
+    width: 100%;
+  }
+  .filter-bar {
+    justify-content: flex-start;
+  }
+  .actions {
+    width: 100%;
+  }
+}
+.step-item {
+  border: 1px solid var(--el-border-color-light);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  background: var(--el-fill-color-blank);
+}
+.step-head,
+.step-body {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.step-head {
+  margin-bottom: 8px;
+}
+.step-no {
+  font-weight: 600;
+  color: var(--el-text-color-secondary);
+  font-size: 13px;
+}
+.grow {
+  flex: 1;
+  min-width: 140px;
+}
+.muted {
+  color: var(--el-text-color-secondary);
+}
+</style>

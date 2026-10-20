@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><title>新建订单</title></head>
+<body>
+<h1>新建订单</h1>
+<form id="orderForm">
+  <div><label>收货人：<input id="receiverName" placeholder="请输入收货人"></label></div>
+  <div><label>手机号：<input id="phone" placeholder="请输入手机号"></label></div>
+  <div><label>收货地址：<input id="address" placeholder="请输入收货地址"></label></div>
+  <div><label>金额：<input id="amount" placeholder="请输入订单金额"></label></div>
+  <div><label>备注：<input id="remark" placeholder="请输入备注"></label></div>
+  <button type="submit">提交订单</button>
+</form>
+<div id="msg"></div>
+<script>
+document.getElementById('orderForm').addEventListener('submit', function (e) {
+  e.preventDefault()
+  var receiverName = document.getElementById('receiverName').value
+  var phone = document.getElementById('phone').value
+  var address = document.getElementById('address').value
+  var amount = document.getElementById('amount').value
+  var remark = document.getElementById('remark').value
+  function msg(t) { document.getElementById('msg').innerText = t }
+  if (!receiverName) { msg('收货人不能为空'); return }
+  if (receiverName.length > 20) { msg('收货人不能超过20个字符'); return }
+  if (!phone) { msg('手机号不能为空'); return }
+  if (!/^1[3-9]\d{9}$/.test(phone)) { msg('手机号格式不正确'); return }
+  if (!address) { msg('收货地址不能为空'); return }
+  if (address.length > 100) { msg('收货地址不能超过100个字符'); return }
+  if (!amount) { msg('订单金额不能为空'); return }
+  if (remark.length > 200) { msg('备注不能超过200个字符'); return }
+  var order = { orderNo: 'ORD' + Date.now(), receiverName: receiverName, amount: amount, remark: remark, status: 'CREATED', statusLabel: '待支付' }
+  sessionStorage.setItem('newOrder', JSON.stringify(order))
+  sessionStorage.setItem('justCreated', '1')
+  setTimeout(function () { location.href = '/orders/list' }, 500)
+})
+</script>
+</body>
+</html>

@@ -1,0 +1,18 @@
+# AICase Core 运行依赖（版本下限；V8 收口时按实测固定为 ==）
+fastapi>=0.115
+uvicorn[standard]>=0.30
+sqlalchemy>=2.0.30
+pydantic>=2.7
+pydantic-settings>=2.2
+jinja2>=3.1
+pypdf>=4.0
+python-docx>=1.1
+pymysql>=1.1
+python-multipart>=0.0.9
+
+# 测试
+pytest>=8.0
+httpx>=0.27
+
+# 浏览器自动化（V6 起使用；提前安装以尽早暴露 Python 3.14 兼容问题）
+playwright>=1.45

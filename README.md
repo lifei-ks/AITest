@@ -1,0 +1,206 @@
+# AICase Core
+
+**基于「被测系统事实 + 需求文档」的测试用例自动生成与真实浏览器自动执行平台。**
+
+输入一个 Spring Boot + Vue 项目的源码和本期需求文档，自动产出：结构化测试点、可直接执行的测试用例（带具体参数）、真机执行证据（逐步截图 + 录屏）、AI 截图审核报告、覆盖矩阵、HTML 报告与脑图。
+
+> 需求版本（V1.0 / V2.0 …）贯穿全链路：不同期需求文档对应不同测试用例，支持按版本筛选、隔离、回看历史。
+
+## 截图
+
+| 总览看板 | 需求版本 + 测试点 | AI 截图审核报告 |
+|---|---|---|
+| ![dashboard](docs/images/dashboard.png) | ![requirements](docs/images/requirements.png) | ![review](docs/images/review-report.png) |
+
+## 核心能力
+
+### 1. 代码静态分析（纯规则）
+- 后端：接口端点、实体字段、`@NotBlank/@Size/@Pattern` 约束、枚举、业务规则
+- 前端：页面与路由、表单字段、placeholder/选择器、UI 文案
+- 状态机：从状态枚举 + 业务方法推断状态流转（带 `verified` 证据标记）
+
+### 2. 需求版本管理
+- 一期需求 = 一个版本（`V1.0 / V2.0 …`），支持新建、编辑、上传 PRD（txt/md/docx/pdf）
+- 修改需求内容会作废旧测试点，等待重新解析
+
+### 3. 测试点抽取（LLM 优先，规则兜底）
+- LLM 阅读「本期需求文档 + 代码事实」，抽取最多 20 个测试点（主流程/校验/边界/状态/权限）
+- 测试点带分类、优先级、页面路由、涉及字段、预期结果
+- 无 Key / LLM 失败时自动降级规则模式
+
+### 4. 用例生成（按测试点，带具体参数）
+- LLM 按测试点小批量生成（每批 5 条），要求回填真实路由/placeholder/按钮文案/具体输入值
+- 某批失败只对该批降级规则，不影响整体；规则模式按正例/反例/边界/流转四类补足
+- 强制用例首步为页面导航，保证可被执行器消费
+- 三道质量闸：Lint 拦截、100 分制打分、相似度去重
+
+### 5. 自动执行（Playwright）
+- 结构化步骤 `ui_action / input / state_assert`
+- 五级定位兜底（选择器 → 文本 → 全页 → XPath）+ 三层断言（URL → 文案锚点 → 诚实 skipped）
+- 逐步截图 + WebM 录屏，失败即停并记录原因
+
+### 6. AI 截图审核（多模态 LLM）
+- 执行完成后自动取 6 张关键截图交给多模态模型审核
+- 输出：结论 + 置信度 + 逐图分析 + 问题区域坐标（红框标注）
+- `ok` 且无技术错误 → 自动通过；`suspect / unavailable` → 待复核
+- 支持人工通过/判失败、单条/批量重新审核
+- 多模态模型可复用文本 LLM，也可单独配置
+
+### 7. 用例管理与版本隔离
+- 列表筛选（含需求版本）、编辑、版本历史/回滚、批量删除、复制、CSV 导入导出
+- 用例通过 `requirement_cases` 与版本映射；删除版本只删其自动生成的用例，手工用例保留
+- 用例列表、脑图、执行结果均支持按需求版本区分
+
+### 8. 覆盖矩阵 / 报告 / 脑图
+- 覆盖矩阵：规划 vs 执行（接口 / 状态流转 / 业务规则）
+- HTML 报告（含截图）、XMind / Markdown 脑图导出
+
+## 架构
+
+```
+需求文档(本期) ──┐
+                 ├─► 测试点(LLM 优先/规则兜底) ──► 用例(按测试点,LLM+规则)
+代码源码 ──静态分析──┘                                          │
+                 ┌──────────────────────────────────────────────┤
+                 ▼                                              ▼
+        结构化事实(端点/字段/约束/状态机/表单/选择器)       质量闸 → 落库(按版本隔离)
+                                                                 │
+                                           自动执行(Playwright)  │
+                                                                 ▼
+                                        逐步截图 + 录屏 ──► 多模态 AI 审核
+                                                                 │
+                                         通过 / 待复核(红框定位+逐图报告)
+```
+
+**确定性 / 不确定性分流**：
+- 静态分析、状态机提取、质量闸、覆盖率统计、执行器 = **纯规则**（可复现、可审计）
+- 需求→测试点、事实→用例参数、截图语义判断 = **LLM**（可选，可降级/摘除）
+
+## 技术栈
+
+- 后端：FastAPI · SQLAlchemy 2.0 · Pydantic v2 · SQLite/MySQL · Jinja2
+- 前端：Vue 3 · Element Plus · Pinia · Vue Router · ECharts
+- 执行：Playwright（Chromium）
+- LLM：OpenAI 兼容协议（`/chat/completions`），支持 JSON mode 与多模态图片输入
+
+## 快速开始
+
+> 环境：Python 3.11+、Node.js 18+
+
+```bash
+# 0. 安装依赖
+python -m venv .venv
+.venv/Scripts/activate          # Linux/macOS: source .venv/bin/activate
+pip install -r requirements.txt
+playwright install chromium
+
+cd frontend
+npm install
+cd ..
+
+# 1. 配置环境变量
+cp .env.example .env            # 按需填写 DATABASE_URL / LLM_*
+
+# 2. 启动后端（自动建表）
+.venv/Scripts/python -m uvicorn app.main:app --port 8100
+
+# 3. 启动前端（默认代理到 8100）
+cd frontend && npm run dev
+# 打开 http://127.0.0.1:5173
+
+# 4. 演示靶站（自动执行需要）
+.venv/Scripts/python scripts/demo_site/serve.py   # 端口 8200
+```
+
+## 配置（`.env`）
+
+| 变量 | 说明 | 默认 |
+|---|---|---|
+| `DATABASE_URL` | SQLite 或 MySQL 连接串 | `sqlite:///./data/aicase.db` |
+| `OUTPUT_DIR` | 截图/录屏/报告输出目录 | `./outputs` |
+| `TARGET_URL_DEFAULT` | 被测站点默认地址 | `http://127.0.0.1:8200` |
+| `LLM_API_KEY` / `LLM_BASE_URL` / `LLM_MODEL` | 文本 LLM（需求解析、用例生成） | 空 = 纯规则模式 |
+| `LLM_VISION_API_KEY` / `LLM_VISION_BASE_URL` / `LLM_VISION_MODEL` | 多模态 LLM（截图审核）；留空自动复用文本 LLM | 空 |
+
+## 使用流程
+
+```
+1. 项目列表 → 新建项目（源码路径 / 被测地址）
+2. 进入项目 → 触发代码分析
+3. 「需求版本」→ 新建 V1.0，填写/上传本期需求文档 → 解析测试点
+4. 「用例生成」→ 选版本 → 生成用例（自动/LLM/规则）
+5. 「测试用例」→ 执行单条/批量
+6. 「执行结果」→ 查看截图、录屏、AI 审核报告；待复核的人工处理
+7. 「脑图」/「下载 HTML 报告」按需导出
+```
+
+## 目录结构
+
+```
+app/              后端（routers/service/analyzer/agent/llm/entity/common/dto）
+frontend/         Vue 3 前端
+scripts/          demo_site(演示靶站) / sample_src(样本源码) / e2e.py / analyze_cli.py / gen_mysql_ddl.py
+tests/            后端测试
+migrations/mysql/ MySQL DDL（由 scripts/gen_mysql_ddl.py 生成）
+docs/             任务书 / 计划 / 迭代记录 / 截图
+main.py           便捷入口
+```
+
+## 关键接口
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET/POST | `/api/projects` | 项目列表 / 新建 |
+| POST | `/api/projects/{pid}/analyze` | 触发代码分析 |
+| GET/POST | `/api/projects/{pid}/requirements` | 需求版本列表 / 新建 |
+| POST | `/api/requirements/{rid}/analyze` | 解析测试点（auto/llm/rule） |
+| POST | `/api/requirements/{rid}/generate` | 按版本生成用例 |
+| GET | `/api/requirements/{rid}/generate/stream` | SSE 流式生成 |
+| GET | `/api/projects/{pid}/testcases?requirementId=` | 用例列表（按版本过滤） |
+| POST | `/api/projects/{pid}/testcases/{cid}/execute` | 执行单条用例 |
+| POST | `/api/projects/{pid}/testcases/batch-execute` | 批量执行 |
+| GET | `/api/projects/{pid}/executions?requirementId=` | 执行结果（按版本过滤） |
+| POST | `/api/executions/{eid}/llm-review` | 单条 AI 审核 |
+| POST | `/api/executions/batch-llm-review` | 批量 AI 审核 |
+| POST | `/api/executions/{eid}/review` | 人工复核（pass/fail） |
+| GET | `/api/projects/{pid}/mindmap/preview?requirementId=` | 脑图预览 |
+| GET | `/api/projects/{pid}/report?requirementId=` | HTML 报告 |
+
+## 数据模型
+
+启动时由 SQLAlchemy `create_all` 自动建表（也提供 `migrations/mysql/001_init.sql`，共 15 张表），核心表：
+
+- `projects` / `code_analyses` / `state_machines`
+- `requirements`（需求版本）/ `test_points`（测试点）
+- `test_cases` / `test_case_versions` / `requirement_cases`（版本↔用例映射）
+- `execution_records` / `execution_steps` / `execution_requirements`（执行↔版本快照）
+- `execution_reviews` / `execution_review_images`（逐图分析）/ `execution_review_issues`（问题定位）
+
+## 验证
+
+```bash
+pytest                                   # 后端全量测试（临时库）
+cd frontend && npm run build             # 前端构建
+.venv/Scripts/python scripts/e2e.py      # 端到端自检
+.venv/Scripts/python scripts/analyze_cli.py <源码路径>   # 命令行静态分析
+```
+
+## 已知边界（诚实声明）
+
+- 静态分析基于启发式正则，覆盖常见写法，非语法级精确解析。
+- LLM 生成的截图问题红框坐标为模型估算，存在偏移；后端已做裁剪/校验，不会越界。
+- 执行依赖被测站点已在 `target_url` 运行、且本机已安装 Playwright Chromium。
+- 项目分析当前支持 `local_path`，Git 仓库拉取未实现。
+- 单次批量 AI 审核上限 20 条，逐条串行调用，耗时随条数线性增长。
+
+## 发布到 GitHub
+
+```bash
+git init -b main
+git add .
+git commit -m "chore: initial commit"
+git remote add origin https://github.com/<you>/<repo>.git
+git push -u origin main
+```
+
+> `.env`、`data/`、`outputs/`、`node_modules/`、`dist/` 等已在 `.gitignore` 中排除，不会误提交敏感信息。
