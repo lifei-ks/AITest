@@ -152,9 +152,12 @@ def _env_proxies() -> list[str]:
 def _candidates() -> list[str]:
     seen: set[str] = set()
     out: list[str] = []
-    pool = _windows_system_proxies() + _env_proxies() + [
-        f"http://127.0.0.1:{p}" for p in PROXY_PORTS
-    ]
+    # 固定端口优先：代理软件的混合端口通常就在这里，比环境变量/系统代理残留更可信
+    pool = (
+        [f"http://127.0.0.1:{p}" for p in PROXY_PORTS]
+        + _windows_system_proxies()
+        + _env_proxies()
+    )
     for item in pool:
         key = item.lower().rstrip("/")
         if key in seen:
@@ -321,14 +324,23 @@ def main() -> int:
 
     if args.dry_run:
         log(f"[dry-run] 最终代理: {proxy or '（直连，无可用代理）'}")
-        return 0 if proxy or True else 1
+        return 0
 
-    if proxy:
-        if push(args.remote, branch, proxy):
+    # 代理偶发断流（节点切换 / 隧道瞬断）时重试，最多 3 轮；每轮重新探测避免死守失效端口
+    for attempt in range(1, 4):
+        if attempt > 1:
+            log(f"[retry] 第 {attempt}/3 轮，重新探测代理 ...")
+            time.sleep(2)
+            proxy = find_proxy(verbose=False) or find_proxy_by_port(verbose=False)
+        if proxy and push(args.remote, branch, proxy):
             return 0
-        log("[push] 代理推送失败，尝试直连兜底 ...")
+        if not proxy:
+            log("[push] 无可用代理，跳过本轮")
+
+    log("[push] 代理方式均失败，尝试直连兜底 ...")
     if push(args.remote, branch, None):
         return 0
+    log("[push] 全部失败。请确认代理软件已启动并选好节点，然后重试：python scripts/git_push.py")
     return 1
 
 
