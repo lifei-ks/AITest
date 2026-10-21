@@ -32,7 +32,7 @@ from pathlib import Path
 
 PROXY_PORTS = (
     7897, 7890, 7891, 7892, 7893, 7898,
-    9433, 12450, 10809, 10808, 1080, 2080, 20171, 8889, 8080, 8081,
+    12450, 10809, 10808, 1080, 2080, 20171, 8889,
 )
 
 PROXY_EXES = (
@@ -176,7 +176,24 @@ def find_proxy(verbose: bool = True) -> str | None:
                 log(f"[proxy] 可用代理: {proxy}")
             return proxy
         if verbose:
-            log(f"[proxy] 跳过 {proxy}（端口在听但无法访问 GitHub）")
+            log(f"[proxy] 跳过 {proxy}（端口在听但无法建立到 GitHub 的隧道）")
+    return None
+
+
+def find_proxy_by_port(verbose: bool = False) -> str | None:
+    """只扫常见端口，不读环境变量/系统代理残留。
+
+    刚拉起代理软件时用它：此时环境变量里可能有别的（如沙箱或旧工具留下的）端口，
+    会把探测带偏，导致明明新代理已就绪却用错端口。
+    """
+    for port in PROXY_PORTS:
+        if not _port_open(port):
+            continue
+        proxy = f"http://127.0.0.1:{port}"
+        if _proxy_works(proxy):
+            if verbose:
+                log(f"[proxy] 可用代理: {proxy}")
+            return proxy
     return None
 
 
@@ -211,8 +228,8 @@ def launch_proxy(exe: str, wait_seconds: int = 60) -> str | None:
         return None
     deadline = time.time() + wait_seconds
     while time.time() < deadline:
-        time.sleep(3)
-        proxy = find_proxy(verbose=False)
+        time.sleep(1.5)
+        proxy = find_proxy_by_port(verbose=False)
         if proxy:
             log(f"[proxy] 代理已就绪: {proxy}")
             return proxy
