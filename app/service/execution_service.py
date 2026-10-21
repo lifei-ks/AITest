@@ -99,7 +99,6 @@ def review_to_dict(
         "verdict": review.verdict,
         "reason": review.reason,
         "model": review.model,
-        "confidence": review.confidence,
         "imageCount": review.image_count,
         "reviewer": review.reviewer,
         "reviewerNote": review.reviewer_note,
@@ -209,7 +208,8 @@ def _upsert_review(session: Session, execution_id: str, result: dict) -> Executi
     review.verdict = result["verdict"]
     review.reason = result.get("reason")
     review.model = result.get("model")
-    review.confidence = result.get("confidence")
+    # 已废弃：不再采集模型自报的置信度（无校准依据、不参与判定），重审时显式清空旧值
+    review.confidence = None
     review.image_count = result.get("imageCount") or 0
     review.reviewer = "llm"
     review.reviewer_note = None

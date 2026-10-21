@@ -86,9 +86,6 @@
                       ? (row.status === 'passed' ? '人工通过' : '人工失败')
                       : `AI 审核：${reviewLabel(reviewOf(row).verdict)}` }}
                   </el-tag>
-                  <span v-if="reviewOf(row).confidence != null" class="conf">
-                    置信度 {{ Math.round(reviewOf(row).confidence * 100) }}%
-                  </span>
                   <span class="review-meta">
                     {{ reviewOf(row).model || '—' }} · {{ reviewOf(row).imageCount }} 张截图
                   </span>
@@ -207,9 +204,6 @@
           <el-tooltip :content="reviewTooltip(row)" placement="top">
             <span class="review-tag" @click.stop="openReviewReport(row)">
               <el-tag size="small" :type="reviewDisplay(row).tag">{{ reviewDisplay(row).label }}</el-tag>
-              <span v-if="row.llmReview?.confidence != null" class="conf">
-                {{ Math.round(row.llmReview.confidence * 100) }}%
-              </span>
             </span>
           </el-tooltip>
         </template>
@@ -251,9 +245,6 @@
           <el-tag :type="reviewTag(reportReview.verdict)" size="small">
             AI 结论：{{ reviewLabel(reportReview.verdict) }}
           </el-tag>
-          <span v-if="reportReview.confidence != null" class="conf">
-            置信度 {{ Math.round(reportReview.confidence * 100) }}%
-          </span>
           <span class="muted">
             模型 {{ reportReview.model || '—' }} · {{ reportReview.imageCount }} 张截图
           </span>
@@ -746,12 +737,6 @@ watch(
   align-items: center;
   gap: 6px;
   cursor: pointer;
-}
-.conf {
-  color: var(--el-text-color-regular);
-  font-size: 12px;
-  font-weight: 600;
-  white-space: nowrap;
 }
 .report {
   max-height: 72vh;

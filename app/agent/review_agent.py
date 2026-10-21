@@ -125,7 +125,7 @@ def _build_prompt(case: dict, steps: list[dict], target_url: str, images: list[d
   - problem：一句话说明问题
 
 只输出 JSON：
-{{"verdict":"ok|suspect","confidence":0.0,"reason":"不超过 120 字的中文结论","images":[{{"image":1,"verdict":"ok","analysis":"截图显示订单列表出现新订单，符合预期"}}],"issues":[{{"image":1,"step":2,"bbox":[0.12,0.35,0.78,0.52],"problem":"具体问题"}}]}}"""
+{{"verdict":"ok|suspect","reason":"不超过 120 字的中文结论","images":[{{"image":1,"verdict":"ok","analysis":"截图显示订单列表出现新订单，符合预期"}}],"issues":[{{"image":1,"step":2,"bbox":[0.12,0.35,0.78,0.52],"problem":"具体问题"}}]}}"""
 
 
 def _png_size(path: str) -> tuple[int, int] | None:
@@ -241,7 +241,6 @@ def review_execution(case: dict, steps: list[dict], target_url: str) -> dict | N
         return {
             "verdict": VERDICT_UNAVAILABLE,
             "reason": "没有可用的截图，无法进行 AI 审核",
-            "confidence": None,
             "model": model,
             "imageCount": 0,
             "imageReviews": [],
@@ -276,7 +275,6 @@ def review_execution(case: dict, steps: list[dict], target_url: str) -> dict | N
         return {
             "verdict": VERDICT_UNAVAILABLE,
             "reason": f"AI 审核调用失败：{exc}"[:2000],
-            "confidence": None,
             "model": model,
             "imageCount": len(images),
             "imageReviews": [],
@@ -287,7 +285,6 @@ def review_execution(case: dict, steps: list[dict], target_url: str) -> dict | N
         return {
             "verdict": VERDICT_UNAVAILABLE,
             "reason": "视觉模型返回结构非法",
-            "confidence": None,
             "model": model,
             "imageCount": len(images),
             "imageReviews": [],
@@ -303,17 +300,10 @@ def review_execution(case: dict, steps: list[dict], target_url: str) -> dict | N
     if issues:
         parts = [f"图{it['imageIndex']}：{it['problem']}" for it in issues]
         reason = (reason + "；" + "；".join(parts))[:2000]
-    try:
-        confidence = float(data.get("confidence"))
-    except (TypeError, ValueError):
-        confidence = None
-    if confidence is not None:
-        confidence = max(0.0, min(1.0, confidence))
 
     return {
         "verdict": verdict,
         "reason": reason or "视觉模型未给出原因",
-        "confidence": confidence,
         "model": model,
         "imageCount": len(images),
         "imageReviews": image_reviews,

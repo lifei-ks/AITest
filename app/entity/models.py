@@ -172,6 +172,8 @@ class ExecutionReview(Base):
     verdict: Mapped[str] = mapped_column(String(20), nullable=False)
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     model: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # 已废弃：模型自报置信度无校准依据、不参与判定，接口不再输出，新记录恒为 NULL。
+    # 保留列仅为避免对已有 MySQL 表做破坏性迁移。
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     image_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     reviewer: Mapped[str | None] = mapped_column(String(20), nullable=True)

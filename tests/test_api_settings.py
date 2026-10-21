@@ -20,6 +20,14 @@ def test_mask_long():
 
 def test_get_info_structure():
     info = get_info()
-    assert set(info.keys()) == {"llmApiKey", "llmApiKeyConfigured", "llmBaseUrl", "llmModel"}
+    # 必需字段必须在（文本模型 + 视觉模型两组配置）；不锁死全集，避免新增配置项就挂
+    required = {
+        "llmApiKey", "llmApiKeyConfigured", "llmBaseUrl", "llmModel",
+        "llmVisionApiKey", "llmVisionBaseUrl", "llmVisionModel",
+        "visionConfigured", "visionUsesText",
+    }
+    assert required <= set(info.keys())
     assert info["llmApiKey"] == "" or "***" in info["llmApiKey"]
     assert isinstance(info["llmApiKeyConfigured"], bool)
+    # 视觉 Key 同样不能明文回显
+    assert info["llmVisionApiKey"] == "" or "***" in info["llmVisionApiKey"]
