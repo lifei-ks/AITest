@@ -321,6 +321,8 @@ def generate(
             )
             if old_ids:
                 session.query(TestCaseVersion).filter(TestCaseVersion.test_case_id.in_(old_ids)).delete(synchronize_session=False)
+                # 同步清理版本映射，否则留下孤儿映射；后续新建用例复用 TC-xxxx ID 时会被错误关联
+                session.query(RequirementCase).filter(RequirementCase.test_case_id.in_(old_ids)).delete(synchronize_session=False)
                 session.query(TestCase).filter(TestCase.id.in_(old_ids)).delete(synchronize_session=False)
                 session.flush()
 

@@ -13,7 +13,7 @@ from app.agent.quality_gate import run_quality_gate
 from app.agent.test_generator_agent import GeneratedCase
 from app.common.errors import BizError
 from app.common.timeutil import to_utc_iso
-from app.entity.models import Project, RequirementCase, TestCase, TestCaseVersion
+from app.entity.models import Project, Requirement, RequirementCase, TestCase, TestCaseVersion
 
 logger = logging.getLogger(__name__)
 
@@ -51,12 +51,20 @@ def _to_dict(tc: TestCase) -> dict:
     return case_to_dict(tc)
 
 
-def _attach_requirement(session: Session, items: list[dict]) -> None:
-    """批量补 requirementId / testPointId，避免前端逐条查询。"""
+def _attach_requirement(session: Session, items: list[dict], pid: str | None = None) -> None:
+    """批量补 requirementId / testPointId，避免前端逐条查询。
+
+    pid 提供时只关联该项目下的需求版本，防止孤儿/跨项目映射污染显示。
+    """
     ids = [i["id"] for i in items]
     if not ids:
         return
     rows = list(session.scalars(select(RequirementCase).where(RequirementCase.test_case_id.in_(ids))))
+    if pid is not None:
+        project_req_ids = set(
+            session.scalars(select(Requirement.id).where(Requirement.project_id == pid))
+        )
+        rows = [r for r in rows if r.requirement_id in project_req_ids]
     mapping = {r.test_case_id: (r.requirement_id, r.test_point_id) for r in rows}
     for item in items:
         rid, tp_id = mapping.get(item["id"], (None, None))
@@ -115,13 +123,14 @@ def list_testcases(session: Session, pid: str, page: int, page_size: int,
              "createdAt": TestCase.created_at.desc()}.get(sort, TestCase.project_seq.asc())
     stmt = stmt.order_by(order).offset((page - 1) * page_size).limit(page_size)
     items = [_to_dict(t) for t in session.scalars(stmt)]
-    _attach_requirement(session, items)
+    _attach_requirement(session, items, pid=pid)
     return {"total": total, "page": page, "pageSize": page_size, "items": items, "testCases": items}
 
 
 def get_testcase(session: Session, cid: str) -> dict:
-    data = _to_dict(_get_or_404(session, cid))
-    _attach_requirement(session, [data])
+    tc = _get_or_404(session, cid)
+    data = _to_dict(tc)
+    _attach_requirement(session, [data], pid=tc.project_id)
     return data
 
 
