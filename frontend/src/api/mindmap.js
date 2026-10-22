@@ -7,7 +7,10 @@ export const downloadMindmap = (pid, format, requirementId) =>
     params: { format, ...(requirementId ? { requirementId } : {}) },
     responseType: 'blob',
   })
-export const getCoverageMatrix = (pid) => request.get(`/projects/${pid}/coverage/matrix`)
+export const getCoverageMatrix = (pid, requirementId) =>
+  request.get(`/projects/${pid}/coverage/matrix`, {
+    params: requirementId ? { requirementId } : {},
+  })
 export const getReport = (pid, requirementId) =>
   request.get(`/projects/${pid}/report`, {
     params: requirementId ? { requirementId } : {},

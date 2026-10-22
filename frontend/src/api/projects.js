@@ -11,5 +11,5 @@ export const setPrd = (id, content) => request.put(`/projects/${id}/prd`, { cont
 export const uploadPrd = (id, file) => {
   const form = new FormData()
   form.append('file', file)
-  return request.post(`/projects/${id}/prd/upload`, form)
+  return request.post(`/projects/${id}/prd/upload`, form, { timeout: 120000 })
 }

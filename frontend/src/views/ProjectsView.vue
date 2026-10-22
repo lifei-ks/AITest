@@ -75,7 +75,7 @@
       :title="form.id ? '编辑项目' : '新建项目'"
       width="560px"
       :close-on-click-modal="false"
-      @closed="formRef?.clearValidate()"
+      @closed="onDialogClosed"
     >
       <el-form ref="formRef" :model="form" :rules="rules" label-width="100px">
         <el-form-item label="项目名称" prop="name">
@@ -104,10 +104,19 @@
         <el-form-item label="被测地址" prop="targetUrl">
           <el-input v-model="form.targetUrl" placeholder="http://127.0.0.1:8200" />
         </el-form-item>
+        <el-form-item label="需求文档">
+          <PrdDropUpload
+            ref="prdDropRef"
+            v-model="prdFile"
+            title="拖拽项目需求文档"
+            hint="可选；保存项目后自动上传并解析为 PRD，支持 .md、.txt、.pdf、.docx"
+            :disabled="saving || prdUploading"
+          />
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
-        <el-button type="primary" :loading="saving" @click="save">保存</el-button>
+        <el-button type="primary" :loading="saving || prdUploading" @click="save">保存</el-button>
       </template>
     </el-dialog>
   </div>
@@ -117,7 +126,14 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { listProjects, createProject, updateProject, deleteProject } from '../api/projects'
+import {
+  listProjects,
+  createProject,
+  updateProject,
+  deleteProject,
+  uploadPrd,
+} from '../api/projects'
+import PrdDropUpload from '../components/PrdDropUpload.vue'
 import { useConfigStore } from '../stores/config'
 
 const router = useRouter()
@@ -127,6 +143,9 @@ const keyword = ref('')
 const loading = ref(false)
 const dialogVisible = ref(false)
 const saving = ref(false)
+const prdUploading = ref(false)
+const prdFile = ref(null)
+const prdDropRef = ref()
 const formRef = ref()
 const form = ref({})
 
@@ -175,6 +194,8 @@ function clearKeyword() {
 }
 
 function openCreate() {
+  prdFile.value = null
+  prdDropRef.value?.clear()
   form.value = {
     name: '',
     description: '',
@@ -188,8 +209,16 @@ function openCreate() {
 }
 
 function openEdit(p) {
+  prdFile.value = null
+  prdDropRef.value?.clear()
   form.value = { ...p }
   dialogVisible.value = true
+}
+
+function onDialogClosed() {
+  prdFile.value = null
+  prdDropRef.value?.clear()
+  formRef.value?.clearValidate()
 }
 
 async function save() {
@@ -206,9 +235,26 @@ async function save() {
       gitBranch: form.value.gitBranch?.trim() || 'main',
       targetUrl: form.value.targetUrl?.trim(),
     }
-    if (form.value.id) await updateProject(form.value.id, payload)
-    else await createProject(payload)
-    ElMessage.success(form.value.id ? '已更新' : '已创建')
+    const project = form.value.id
+      ? await updateProject(form.value.id, payload)
+      : await createProject(payload)
+    let prdUploadFailed = false
+    if (prdFile.value) {
+      prdUploading.value = true
+      try {
+        await uploadPrd(project.id, prdFile.value)
+      } catch {
+        prdUploadFailed = true
+      } finally {
+        prdUploading.value = false
+      }
+    }
+    if (prdUploadFailed) {
+      ElMessage.warning('项目已保存，但需求文档上传失败，请重新上传')
+    } else {
+      ElMessage.success(form.value.id ? '已更新' : '已创建')
+    }
+    prdFile.value = null
     dialogVisible.value = false
     await load()
     await store.loadProjects().catch(() => {})

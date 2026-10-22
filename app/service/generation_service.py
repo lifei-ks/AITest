@@ -23,7 +23,9 @@ from app.analyzer.models import (
     FrontendResult,
     Page,
     Selector,
+    to_json_dict,
 )
+from app.common.execution_enums import case_status_meta
 from app.config import get_settings
 from app.entity.models import (
     CodeAnalysis,
@@ -213,6 +215,7 @@ def _clear_generated_for_requirement(session: Session, rid: str) -> None:
 
 def case_to_dict(tc: TestCase) -> dict:
     """TestCase ORM → 前端 camelCase dict。"""
+    status_meta = case_status_meta(tc.execution_status)
     return {
         "id": tc.id,
         "projectSeq": tc.project_seq,
@@ -231,7 +234,34 @@ def case_to_dict(tc: TestCase) -> dict:
         "qualityScore": tc.quality_score,
         "lintIssues": json.loads(tc.lint_issues) if tc.lint_issues else [],
         "executionStatus": tc.execution_status,
+        "executionStatusLabel": status_meta["label"],
+        "executionStatusDescription": status_meta["description"],
+        "executionStatusTag": status_meta["tag"],
     }
+
+
+def _enrich_coverage_refs(cases, backend, machines, points: list[dict]) -> None:
+    """生成阶段把测试点/步骤映射到真实覆盖事实，避免覆盖矩阵长期为 0。"""
+    from app.service.coverage_service import resolve_coverage_refs
+
+    backend_dict = to_json_dict(backend)
+    point_by_id = {str(point.get("id")): point for point in points if point.get("id")}
+    for case in cases:
+        test_point_id = str(getattr(case, "test_point_id", "") or "")
+        case_dict = {
+            "title": case.title,
+            "module": case.module,
+            "coverageRefs": case.coverage_refs or {},
+            "steps": case.steps,
+            "structuredSteps": case.structured_steps,
+            "testData": case.test_data,
+        }
+        case.coverage_refs = resolve_coverage_refs(
+            case_dict,
+            backend_dict,
+            machines,
+            point_by_id.get(test_point_id),
+        )
 
 
 def generate(
@@ -308,6 +338,7 @@ def generate(
                     except LlmUnavailable as e:
                         logger.warning("LLM 生成降级规则模式: %s", e)
 
+        _enrich_coverage_refs(cases, backend, machines, points)
         gate = run_quality_gate(cases)
 
         if requirement is not None:

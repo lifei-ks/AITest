@@ -96,7 +96,7 @@ class TestCase(Base):
     confidence: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
     quality_score: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
     lint_issues: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # not_run / passed / failed / skipped
+    # not_run / running / passed / failed / skipped / needs_review / cancelled
     execution_status: Mapped[str] = mapped_column(String(20), nullable=False, default="not_run")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)
@@ -125,7 +125,7 @@ class ExecutionRecord(Base):
     # 执行瞬间的用例完整快照（强制，非可选）
     test_case_snapshot: Mapped[str] = mapped_column(Text, nullable=False)
     batch_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
-    # running / passed / failed / skipped / cancelled
+    # running / passed / failed / skipped / needs_review / cancelled
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="running")
     # programmatic / agent
     mode: Mapped[str] = mapped_column(String(20), nullable=False, default="programmatic")

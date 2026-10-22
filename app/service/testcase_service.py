@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.agent.quality_gate import run_quality_gate
 from app.agent.test_generator_agent import GeneratedCase
 from app.common.errors import BizError
+from app.common.execution_enums import CASE_EXECUTION_STATUSES
 from app.common.timeutil import to_utc_iso
 from app.entity.models import Project, Requirement, RequirementCase, TestCase, TestCaseVersion
 
@@ -251,8 +252,11 @@ def copy_to(session: Session, cids: list[str], target_project_id: str) -> int:
 
 def set_execution_status(session: Session, cid: str, status: str) -> None:
     tc = _get_or_404(session, cid)
-    if status not in ("not_run", "passed", "failed", "skipped"):
-        raise BizError(40013, "非法执行状态")
+    if status not in CASE_EXECUTION_STATUSES:
+        raise BizError(
+            40013,
+            f"非法执行状态: {status}；可选值: {', '.join(CASE_EXECUTION_STATUSES)}",
+        )
     tc.execution_status = status
 
 
@@ -298,7 +302,11 @@ def import_csv(session: Session, pid: str, content: str) -> int:
             confidence=1.0,
             quality_score=int(row["质量分"]) if row.get("质量分") else 100,
             lint_issues="[]",
-            execution_status=row["执行状态"] or "not_run",
+            execution_status=(
+                row["执行状态"]
+                if row["执行状态"] in CASE_EXECUTION_STATUSES
+                else "not_run"
+            ),
         )
         session.add(tc)
         count += 1

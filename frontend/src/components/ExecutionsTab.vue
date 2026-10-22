@@ -35,10 +35,49 @@
 
     <!-- 覆盖矩阵 -->
     <el-card v-if="matrix" shadow="never" class="card">
-      <template #header><b>覆盖矩阵</b></template>
-      <div v-for="(v, k) in blocks" :key="k" class="cov-row">
-        <span class="cov-label">{{ k }}</span>
-        <el-progress :percentage="Math.round((v?.executedRate || 0) * 100)" :format="() => `${v?.executedCovered || 0}/${v?.total || 0}`" />
+      <template #header>
+        <div class="cov-head">
+          <b>覆盖矩阵</b>
+          <span class="muted">规划覆盖来自用例引用；执行覆盖只统计通过记录</span>
+        </div>
+      </template>
+      <el-alert
+        v-if="coverageWarning"
+        :title="coverageWarning"
+        type="warning"
+        :closable="false"
+        show-icon
+        class="coverage-alert"
+      />
+      <div v-for="b in blocks" :key="b.key" class="cov-block">
+        <div class="cov-title">
+          <strong>{{ b.label }}</strong>
+          <span class="muted">
+            规划 {{ b.value.plannedCovered }}/{{ b.value.total }}
+            · 执行 {{ b.value.executedCovered }}/{{ b.value.total }}
+          </span>
+        </div>
+        <div class="cov-progress">
+          <span class="cov-kind">规划</span>
+          <el-progress
+            :percentage="Math.round((b.value.plannedRate || 0) * 100)"
+            :format="() => `${b.value.plannedCovered}/${b.value.total}`"
+            color="#409eff"
+          />
+        </div>
+        <div class="cov-progress">
+          <span class="cov-kind">执行</span>
+          <el-progress
+            :percentage="Math.round((b.value.executedRate || 0) * 100)"
+            :format="() => `${b.value.executedCovered}/${b.value.total}`"
+            color="#67c23a"
+          />
+        </div>
+        <div v-if="b.value.uncovered?.length" class="cov-uncovered">
+          未覆盖：
+          {{ b.value.uncovered.slice(0, 4).map((item) => item.label).join('；') }}
+          <span v-if="b.value.uncovered.length > 4"> 等 {{ b.value.uncovered.length }} 项</span>
+        </div>
       </div>
     </el-card>
 
@@ -62,7 +101,7 @@
             <template v-else-if="detailMap[row.id]">
               <el-alert
                 v-if="detailMap[row.id].detail?.errorCategory"
-                :title="`错误分类：${detailMap[row.id].detail.errorCategory}${detailMap[row.id].detail.errorMessage ? ' — ' + detailMap[row.id].detail.errorMessage : ''}`"
+                :title="`错误分类：${detailMap[row.id].detail.errorCategoryLabel || detailMap[row.id].detail.errorCategory} (${detailMap[row.id].detail.errorCategory}) — ${detailMap[row.id].detail.errorCategoryDescription || '执行失败'}${detailMap[row.id].detail.errorMessage ? '；详情：' + detailMap[row.id].detail.errorMessage : ''}`"
                 type="error"
                 :closable="false"
                 class="alert"
@@ -194,7 +233,11 @@
       <el-table-column label="状态" width="100">
         <template #default="{ row }">
           <div class="status-cell">
-            <el-tag size="small" :type="execTag(row.status)">{{ statusLabel(row.status) }}</el-tag>
+            <el-tooltip :content="row.statusDescription || statusDescription(row.status)" placement="top">
+              <el-tag size="small" :type="row.statusTag || execTag(row.status)">
+                {{ row.statusLabel || statusLabel(row.status) }}
+              </el-tag>
+            </el-tooltip>
             <span v-if="row.durationMs != null" class="duration">{{ row.durationMs }}ms</span>
           </div>
         </template>
@@ -209,7 +252,18 @@
         </template>
       </el-table-column>
       <el-table-column v-if="!isNarrow" label="错误分类" width="120" show-overflow-tooltip>
-        <template #default="{ row }"><span :class="{ err: row.errorCategory }">{{ row.errorCategory || '—' }}</span></template>
+        <template #default="{ row }">
+          <el-tooltip
+            v-if="row.errorCategory"
+            :content="`${row.errorCategory}：${row.errorCategoryDescription || '执行失败'}`"
+            placement="top"
+          >
+            <el-tag size="small" :type="row.errorCategoryTag || 'info'">
+              {{ row.errorCategoryLabel || row.errorCategory }}
+            </el-tag>
+          </el-tooltip>
+          <span v-else class="muted">—</span>
+        </template>
       </el-table-column>
       <el-table-column label="开始时间" width="160">
         <template #default="{ row }">{{ row.startTime ? new Date(row.startTime).toLocaleString() : '—' }}</template>
@@ -312,6 +366,7 @@ const STATUS = [
   { v: 'needs_review', l: '待复核' },
   { v: 'running', l: '执行中' },
   { v: 'skipped', l: '跳过' },
+  { v: 'cancelled', l: '已取消' },
 ]
 const STATUS_TEXT = {
   passed: '通过',
@@ -319,6 +374,15 @@ const STATUS_TEXT = {
   needs_review: '待复核',
   running: '执行中',
   skipped: '跳过',
+  cancelled: '已取消',
+}
+const STATUS_DESCRIPTION = {
+  passed: '确定性检查通过，或证据经 AI/人工复核确认符合预期',
+  failed: '出现确定错误，或人工复核确认不符合预期',
+  needs_review: '证据不足、AI 判断有疑点或审核不可用，需要人工确认',
+  running: '正在真实浏览器中执行，尚无最终结论',
+  skipped: '存在无法验证的步骤，缺少充分证据',
+  cancelled: '执行被中止，不能视为通过',
 }
 
 const tableRef = ref()
@@ -346,8 +410,24 @@ const detailMap = ref({})
 let refreshTimer = null
 
 const blocks = computed(() => {
-  if (!matrix.value) return {}
-  return { 接口: matrix.value.apiEndpoint, 状态转换: matrix.value.stateTransition, 规则: matrix.value.businessRule }
+  if (!matrix.value) return []
+  return [
+    { key: 'apiEndpoint', label: '接口', value: matrix.value.apiEndpoint },
+    { key: 'stateTransition', label: '状态转换', value: matrix.value.stateTransition },
+    { key: 'businessRule', label: '业务规则', value: matrix.value.businessRule },
+  ]
+})
+const coverageWarning = computed(() => {
+  if (!matrix.value) return ''
+  const items = blocks.value.filter((b) => b.value?.total > 0)
+  if (!items.length) return '当前没有可统计的代码事实，请先完成代码分析'
+  if (items.every((b) => b.value.plannedCovered === 0)) {
+    return '当前范围内没有用例关联覆盖点。请按需求版本重新生成用例，或检查测试点是否关联了真实接口/状态转换/规则'
+  }
+  if (items.every((b) => b.value.executedCovered === 0)) {
+    return '已有规划覆盖，但还没有通过的执行记录；失败、跳过、待复核和取消都不会计入执行覆盖'
+  }
+  return ''
 })
 
 const latestRequirementId = computed(() =>
@@ -393,7 +473,7 @@ async function load() {
     })
     rows.value = data.items || []
     total.value = data.total || 0
-    matrix.value = await getCoverageMatrix(props.projectId)
+    matrix.value = await getCoverageMatrix(props.projectId, requirementId.value || undefined)
     overview.value = await getOverview()
   } finally {
     loading.value = false
@@ -452,7 +532,11 @@ function reviewTag(verdict) {
 }
 
 function reviewLabel(verdict) {
-  return { ok: '通过', suspect: '异常', unavailable: '无法判定' }[verdict] || '未审核'
+  return {
+    ok: '证据支持预期',
+    suspect: '疑似异常',
+    unavailable: '审核不可用',
+  }[verdict] || '未审核'
 }
 
 function reviewDisplay(row) {
@@ -609,6 +693,9 @@ async function downloadReport() {
 function statusLabel(s) {
   return STATUS_TEXT[s] || s
 }
+function statusDescription(s) {
+  return STATUS_DESCRIPTION[s] || ''
+}
 function execTag(s) {
   return {
     passed: 'success',
@@ -616,6 +703,7 @@ function execTag(s) {
     skipped: 'warning',
     running: 'primary',
     needs_review: 'warning',
+    cancelled: 'info',
   }[s] || 'info'
 }
 function stepTag(s) {
@@ -663,20 +751,49 @@ watch(
 .card {
   margin-bottom: 12px;
 }
-.cov-row {
+.cov-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.coverage-alert {
+  margin-bottom: 12px;
+}
+.cov-block {
+  padding: 10px 0;
+  border-bottom: 1px dashed var(--el-border-color-lighter);
+}
+.cov-block:last-child {
+  border-bottom: none;
+}
+.cov-title,
+.cov-progress {
   display: flex;
   align-items: center;
-  gap: 12px;
-  margin: 8px 0;
+  gap: 10px;
 }
-.cov-label {
-  width: 80px;
+.cov-title {
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+.cov-kind {
+  width: 42px;
   flex: none;
+  color: var(--el-text-color-secondary);
 }
-/* el-progress 默认按内容宽度收缩，需要显式拉伸才能撑满整行 */
-.cov-row :deep(.el-progress) {
+.cov-progress {
+  margin: 4px 0;
+}
+.cov-progress :deep(.el-progress) {
   flex: 1;
   min-width: 0;
+}
+.cov-uncovered {
+  margin-top: 6px;
+  color: var(--el-color-warning-dark-2);
+  font-size: 12px;
+  line-height: 1.5;
 }
 .table {
   margin-top: 4px;

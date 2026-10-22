@@ -159,8 +159,53 @@ main.py           便捷入口
 | POST | `/api/executions/{eid}/llm-review` | 单条 AI 审核 |
 | POST | `/api/executions/batch-llm-review` | 批量 AI 审核 |
 | POST | `/api/executions/{eid}/review` | 人工复核（pass/fail） |
+| GET | `/api/meta/execution` | 执行状态、AI 结论和错误分类的完整枚举说明 |
 | GET | `/api/projects/{pid}/mindmap/preview?requirementId=` | 脑图预览 |
+| GET | `/api/projects/{pid}/coverage/matrix?requirementId=` | 规划/执行覆盖矩阵 |
 | GET | `/api/projects/{pid}/report?requirementId=` | HTML 报告 |
+
+## 覆盖矩阵口径
+
+- **规划覆盖**：用例 `coverageRefs` 中实际引用到当前代码事实的接口、已验证状态转换和业务规则。
+- **执行覆盖**：只统计执行记录 `status=passed` 的用例，并优先读取执行瞬间的用例快照，避免后来编辑用例导致历史覆盖漂移。
+- 失败、跳过、待复核、执行中和已取消均不计入执行覆盖。
+- 覆盖矩阵支持 `requirementId` 参数，页面选择需求版本时只统计该版本用例。
+- 完整结构可通过 `GET /api/meta/execution` 查看。
+
+## 执行状态、AI 审核与错误分类
+
+用例执行状态：
+
+| 值 | 含义 |
+|---|---|
+| `not_run` | 尚未执行 |
+| `running` | 正在真实浏览器中执行 |
+| `passed` | 确定性检查全部通过，或证据经 AI/人工复核确认符合预期 |
+| `failed` | 出现确定错误，或人工复核确认不符合预期 |
+| `skipped` | 存在无法验证的步骤，缺少充分证据 |
+| `needs_review` | 证据不足、AI 判断有疑点或审核不可用，需要人工确认 |
+| `cancelled` | 执行被中止，不能视为通过 |
+
+AI 审核结论：
+
+| 值 | 含义 |
+|---|---|
+| `ok` | 截图和步骤证据支持预期；不能覆盖确定性的执行失败 |
+| `suspect` | 截图异常、与预期不符，或证据不足以证明预期 |
+| `unavailable` | 模型未配置、调用失败、响应非法或没有可用截图 |
+
+自动执行错误分类：
+
+| 值 | 含义 |
+|---|---|
+| `SELECTOR_NOT_FOUND` | 元素未找到，记录尝试过的选择器链 |
+| `ASSERT_FAILED` | URL 或引号锚定文案断言不通过 |
+| `NAVIGATION_FAILED` | 页面打不开或返回 4xx/5xx |
+| `TIMEOUT` | 页面操作或等待超过默认超时 |
+| `CASE_INVALID` | 用例缺结构化步骤、输入值等必需字段 |
+| `ENV_ERROR` | 浏览器启动、驱动或其他环境问题 |
+
+确定性执行失败不会被 AI 的 `ok` 改判为通过；AI 审核只能确认无确定失败的结果，或把不确定结果升级为 `needs_review`。
 
 ## 数据模型
 

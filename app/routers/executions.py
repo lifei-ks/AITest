@@ -11,6 +11,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.common.errors import BizError
+from app.common.execution_enums import (
+    error_category_meta,
+    execution_enum_payload,
+    execution_status_meta,
+)
 from app.common.response import ok
 from app.common.timeutil import to_utc_iso
 from app.config import get_settings
@@ -20,6 +25,12 @@ from app.service import execution_service
 from app.service.execution_service import review_with_issues
 
 router = APIRouter(tags=["executions"])
+
+
+@router.get("/api/meta/execution")
+def execution_metadata():
+    """完整枚举值及中文含义，供前端、报告和外部集成统一使用。"""
+    return ok(execution_enum_payload())
 
 
 def get_session() -> Session:
@@ -92,9 +103,27 @@ def list_executions(pid: str, page: int = Query(1, ge=1), pageSize: int = Query(
         stmt = stmt.where(ExecutionRecord.id.in_(meta_ids or ["__none__"]))
     total = session.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     records = list(session.scalars(stmt.order_by(ExecutionRecord.start_time.desc()).offset((page - 1) * pageSize).limit(pageSize)))
-    items = [{"id": r.id, "testCaseId": r.test_case_id, "testCaseTitle": r.test_case_title, "status": r.status,
-              "mode": r.mode, "durationMs": r.duration_ms, "startTime": to_utc_iso(r.start_time),
-              "batchId": r.batch_id, "errorCategory": r.error_category} for r in records]
+    items = []
+    for record in records:
+        status_meta = execution_status_meta(record.status)
+        category_meta = error_category_meta(record.error_category)
+        items.append({
+            "id": record.id,
+            "testCaseId": record.test_case_id,
+            "testCaseTitle": record.test_case_title,
+            "status": record.status,
+            "statusLabel": status_meta["label"],
+            "statusDescription": status_meta["description"],
+            "statusTag": status_meta["tag"],
+            "mode": record.mode,
+            "durationMs": record.duration_ms,
+            "startTime": to_utc_iso(record.start_time),
+            "batchId": record.batch_id,
+            "errorCategory": record.error_category,
+            "errorCategoryLabel": category_meta["label"],
+            "errorCategoryDescription": category_meta["description"],
+            "errorCategoryTag": category_meta["tag"],
+        })
     if items:
         eids = [i["id"] for i in items]
         reviews = session.scalars(
@@ -125,11 +154,19 @@ def get_execution(eid: str, session: Session = Depends(get_session)):
     meta = session.scalars(
         select(ExecutionRequirement).where(ExecutionRequirement.execution_id == eid)
     ).first()
+    status_meta = execution_status_meta(r.status)
+    category_meta = error_category_meta(r.error_category)
     return ok({"id": r.id, "testCaseId": r.test_case_id, "testCaseTitle": r.test_case_title, "status": r.status,
+               "statusLabel": status_meta["label"], "statusDescription": status_meta["description"],
+               "statusTag": status_meta["tag"],
                "mode": r.mode, "targetUrl": r.target_url, "durationMs": r.duration_ms,
                "startTime": to_utc_iso(r.start_time),
                "endTime": to_utc_iso(r.end_time),
-               "errorCategory": r.error_category, "errorMessage": r.error_message,
+               "errorCategory": r.error_category,
+               "errorCategoryLabel": category_meta["label"],
+               "errorCategoryDescription": category_meta["description"],
+               "errorCategoryTag": category_meta["tag"],
+               "errorMessage": r.error_message,
                "videoPath": r.video_path, "passedSteps": r.passed_steps, "totalSteps": r.total_steps,
                "requirementId": meta.requirement_id if meta else None,
                "requirementVersion": meta.requirement_version if meta else None,

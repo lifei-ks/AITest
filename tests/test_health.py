@@ -34,3 +34,12 @@ def test_validation_error_returns_400_envelope():
     body = resp.json()
     assert body["code"] == 40001
     assert "参数校验失败" in body["message"]
+
+
+def test_execution_metadata_exposes_labels_and_descriptions():
+    resp = client.get("/api/meta/execution")
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["caseExecutionStatuses"]["needs_review"]["label"] == "待复核"
+    assert data["errorCategories"]["TIMEOUT"]["label"] == "步骤超时"
+    assert data["aiReviewVerdicts"]["unavailable"]["description"]

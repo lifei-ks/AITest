@@ -21,6 +21,11 @@ from app.agent.review_agent import (
     vision_enabled,
 )
 from app.common.timeutil import to_utc_iso
+from app.common.execution_enums import (
+    error_category_meta,
+    execution_status_meta,
+    review_verdict_meta,
+)
 from app.config import BASE_DIR, get_settings
 from app.database import SessionLocal
 from app.entity.models import (
@@ -41,10 +46,6 @@ logger = logging.getLogger(__name__)
 
 # batch_id -> cancel flag（内存标记）
 _cancel_flags: dict[str, bool] = {}
-
-# 这些失败属于环境/用例结构问题，即使 AI 说“看起来没问题”也必须人工确认
-HARD_ERRORS = {"SELECTOR_NOT_FOUND", "CASE_INVALID", "ENV_ERROR", "TIMEOUT"}
-
 
 def _abs_output(rel_path: str | None) -> str | None:
     if not rel_path:
@@ -95,8 +96,12 @@ def review_to_dict(
 ) -> dict | None:
     if review is None:
         return None
+    verdict_meta = review_verdict_meta(review.verdict)
     return {
         "verdict": review.verdict,
+        "verdictLabel": verdict_meta["label"],
+        "verdictDescription": verdict_meta["description"],
+        "verdictTag": verdict_meta["tag"],
         "reason": review.reason,
         "model": review.model,
         "imageCount": review.image_count,
@@ -130,19 +135,21 @@ def review_with_issues(session: Session, review: ExecutionReview | None) -> dict
 def _decide_status(original_status: str, error_category: str | None, verdict: str) -> str:
     """AI 结论 → 最终状态。
 
-    - suspect / unavailable：一律转人工复核
-    - ok + 硬错误（选择器/环境/用例非法）：仍要人工复核，避免把没跑起来判成通过
-    - ok + 断言失败/跳过/原通过：直接通过
+    确定性执行结论优先：AI 可以确认通过或升级为人工复核，但不能把明确的
+    failed/cancelled 改判为 passed。只有原始执行无确定失败时，AI ok 才能
+    为 skipped（缺少文本锚点）提供补充证据。
     """
-    if verdict in (VERDICT_SUSPECT, VERDICT_UNAVAILABLE):
-        return "needs_review"
-    if verdict != VERDICT_OK:
-        return "needs_review"
+    del error_category
+    if original_status in ("failed", "cancelled"):
+        return original_status
     if original_status == "passed":
-        return "passed"
-    if (error_category or "") in HARD_ERRORS:
-        return "needs_review"
-    return "passed"
+        return "passed" if verdict == VERDICT_OK else "needs_review"
+    if original_status == "skipped":
+        if verdict == VERDICT_OK:
+            return "passed"
+        if verdict in (VERDICT_SUSPECT, VERDICT_UNAVAILABLE):
+            return "needs_review"
+    return "needs_review"
 
 
 def _requirement_for_case(session: Session, cid: str) -> Requirement | None:
@@ -274,12 +281,18 @@ def _rel_path(abs_path: str | None) -> str | None:
         return str(abs_path).replace("\\", "/")
 
 
-def execute_single(pid: str, cid: str, target_url: str | None = None, mode: str = "programmatic") -> dict:
+def execute_single(
+    pid: str,
+    cid: str,
+    target_url: str | None = None,
+    mode: str = "programmatic",
+    batch_id: str | None = None,
+) -> dict:
     """同步执行单条用例，落库执行记录 + 步骤，回写用例状态。"""
     session = SessionLocal()
     try:
         tc = session.get(TestCase, cid)
-        if tc is None:
+        if tc is None or tc.project_id != pid:
             from app.common.errors import BizError
 
             raise BizError(40402, f"用例不存在: {cid}", http_status=404)
@@ -295,8 +308,10 @@ def execute_single(pid: str, cid: str, target_url: str | None = None, mode: str 
             id=eid, project_id=pid, test_case_id=cid,
             test_case_title=tc.title, test_case_snapshot=json.dumps(snapshot, ensure_ascii=False),
             status="running", mode=mode, target_url=target, start_time=_now(),
+            batch_id=batch_id,
         )
         session.add(record)
+        tc.execution_status = "running"
         # 执行时固化需求版本，便于执行结果按 V1/V2 区分
         req = _requirement_for_case(session, cid)
         session.add(
@@ -364,8 +379,15 @@ def execute_single(pid: str, cid: str, target_url: str | None = None, mode: str 
         )
         session.commit()
 
-        return {"executionId": eid, "status": record.status, "passedSteps": record.passed_steps,
+        status_meta = execution_status_meta(record.status)
+        category_meta = error_category_meta(record.error_category)
+        return {"executionId": eid, "status": record.status,
+                "statusLabel": status_meta["label"],
+                "statusDescription": status_meta["description"],
+                "passedSteps": record.passed_steps,
                 "totalSteps": record.total_steps, "errorCategory": record.error_category,
+                "errorCategoryLabel": category_meta["label"],
+                "errorCategoryDescription": category_meta["description"],
                 "errorMessage": record.error_message, "videoPath": record.video_path,
                 "durationMs": duration_ms, "llmReview": review_with_issues(session, review_row),
                 "requirementId": req.id if req else None,
@@ -401,7 +423,14 @@ def manual_review(eid: str, decision: str, note: str | None = None) -> dict:
         if tc is not None:
             tc.execution_status = record.status
         session.commit()
-        return {"executionId": eid, "status": record.status, "llmReview": review_with_issues(session, review)}
+        status_meta = execution_status_meta(record.status)
+        return {
+            "executionId": eid,
+            "status": record.status,
+            "statusLabel": status_meta["label"],
+            "statusDescription": status_meta["description"],
+            "llmReview": review_with_issues(session, review),
+        }
     finally:
         session.close()
 
@@ -429,6 +458,18 @@ def _steps_for_review(session: Session, eid: str) -> list[dict]:
     ]
 
 
+def _original_status_from_steps(steps: list[dict], fallback: str) -> str:
+    """从步骤恢复确定性执行结论，供 AI 重审时使用。"""
+    results = [step.get("result") for step in steps]
+    if any(result == "failed" for result in results):
+        return "failed"
+    if any(result == "skipped" for result in results):
+        return "skipped"
+    if results and all(result == "passed" for result in results):
+        return "passed"
+    return fallback if fallback in ("failed", "cancelled", "passed", "skipped") else "needs_review"
+
+
 def rerun_llm_review(eid: str) -> dict:
     """重新调用视觉模型审核（例如刚配置好视觉模型后）。"""
     from app.common.errors import BizError
@@ -440,6 +481,11 @@ def rerun_llm_review(eid: str) -> dict:
         record = session.get(ExecutionRecord, eid)
         if record is None:
             raise BizError(40404, f"执行记录不存在: {eid}", http_status=404)
+        existing_review = session.scalars(
+            select(ExecutionReview).where(ExecutionReview.execution_id == eid)
+        ).first()
+        if existing_review is not None and existing_review.reviewer == "manual":
+            raise BizError(40024, "人工复核结论已锁定，请重新执行人工复核")
         snapshot = json.loads(record.test_case_snapshot) if record.test_case_snapshot else {}
         steps = _steps_for_review(session, eid)
         result = review_execution(snapshot, steps, record.target_url or "")
@@ -447,13 +493,20 @@ def rerun_llm_review(eid: str) -> dict:
             raise BizError(40022, "未配置 LLM（model + key），无法进行 AI 审核")
         review = _upsert_review(session, eid, result)
 
-        original = "passed" if record.passed_steps >= record.total_steps and not record.error_category else "failed"
+        original = _original_status_from_steps(steps, record.status)
         record.status = _decide_status(original, record.error_category, result["verdict"])
         tc = session.get(TestCase, record.test_case_id)
         if tc is not None:
             tc.execution_status = record.status
         session.commit()
-        return {"executionId": eid, "status": record.status, "llmReview": review_with_issues(session, review)}
+        status_meta = execution_status_meta(record.status)
+        return {
+            "executionId": eid,
+            "status": record.status,
+            "statusLabel": status_meta["label"],
+            "statusDescription": status_meta["description"],
+            "llmReview": review_with_issues(session, review),
+        }
     finally:
         session.close()
 
@@ -496,13 +549,17 @@ def execute_batch(pid: str, case_ids: list[str], target_url: str | None = None, 
     _cancel_flags[batch_id] = False
 
     def run():
-        for cid in case_ids:
-            if _cancel_flags.get(batch_id):
-                break
-            try:
-                execute_single(pid, cid, target_url, mode)
-            except Exception as e:  # noqa: BLE001
-                logger.exception("批量执行单条失败 %s", cid)
+        try:
+            for cid in case_ids:
+                if _cancel_flags.get(batch_id):
+                    break
+                try:
+                    execute_single(pid, cid, target_url, mode, batch_id=batch_id)
+                except Exception:  # noqa: BLE001
+                    logger.exception("批量执行单条失败 %s", cid)
+        finally:
+            # 避免取消标记长期驻留内存；执行记录本身的 batch_id 已持久化。
+            _cancel_flags.pop(batch_id, None)
 
     threading.Thread(target=run, daemon=True).start()
     return batch_id
@@ -521,11 +578,17 @@ def get_batch(batch_id: str) -> dict:
         failed = sum(1 for r in records if r.status == "failed")
         skipped = sum(1 for r in records if r.status == "skipped")
         running = any(r.status == "running" for r in records)
+        needs_review = sum(1 for r in records if r.status == "needs_review")
+        cancelled = sum(1 for r in records if r.status == "cancelled")
         return {
             "batchId": batch_id, "total": total, "passed": passed, "failed": failed, "skipped": skipped,
+            "needsReview": needs_review, "cancelled": cancelled,
             "running": running, "durationMs": sum(r.duration_ms for r in records),
             "items": [{"executionId": r.id, "testCaseId": r.test_case_id, "title": r.test_case_title,
-                       "status": r.status, "durationMs": r.duration_ms} for r in records],
+                       "status": r.status,
+                       "statusLabel": execution_status_meta(r.status)["label"],
+                       "statusDescription": execution_status_meta(r.status)["description"],
+                       "durationMs": r.duration_ms} for r in records],
         }
     finally:
         session.close()

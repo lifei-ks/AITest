@@ -10,12 +10,11 @@ import logging
 import re
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
-ERROR_CATEGORIES = (
-    "SELECTOR_NOT_FOUND", "ASSERT_FAILED", "NAVIGATION_FAILED",
-    "TIMEOUT", "CASE_INVALID", "ENV_ERROR",
-)
+from app.common.execution_enums import ERROR_CATEGORIES
+
+logger = logging.getLogger(__name__)
 
 # 引号锚点：中文角括号「」『』 / 弯引号 / 英文引号
 QUOTE_ANCHOR_RE = re.compile(r"[\u300c\u300e\u201c\u2018\"']([^\u300d\u300f\u201d\u2019\"']+)[\u300d\u300f\u201d\u2019\"']")
@@ -149,7 +148,12 @@ def execute_case(case: dict, target_url: str, output_dir: str, mode: str = "prog
                     if stype == "ui_action" and (step.get("uiSelector") or {}).get("type") == "route":
                         route = step["uiSelector"]["value"]
                         url = target_url.rstrip("/") + ("/" + route.lstrip("/") if route else "")
-                        page.goto(url)
+                        response = page.goto(url)
+                        if response is not None and response.status >= 400:
+                            raise _StepError(
+                                "NAVIGATION_FAILED",
+                                f"页面返回 HTTP {response.status}: {url}",
+                            )
                         page.wait_for_timeout(300)
                     elif stype == "ui_action":
                         loc, attempted = _find_locator(page, step)
@@ -179,10 +183,17 @@ def execute_case(case: dict, target_url: str, output_dir: str, mode: str = "prog
                     result = "failed"
                     error = e.message
                     record["errorCategory"] = record["errorCategory"] or e.category
+                except PlaywrightTimeoutError as e:
+                    result = "failed"
+                    error = f"步骤超时: {e}"
+                    record["errorCategory"] = record["errorCategory"] or "TIMEOUT"
                 except Exception as e:  # noqa: BLE001
                     result = "failed"
                     error = f"{type(e).__name__}: {e}"
-                    record["errorCategory"] = record["errorCategory"] or "ENV_ERROR"
+                    is_navigation = stype == "ui_action" and (step.get("uiSelector") or {}).get("type") == "route"
+                    record["errorCategory"] = record["errorCategory"] or (
+                        "NAVIGATION_FAILED" if is_navigation else "ENV_ERROR"
+                    )
 
                 try:
                     page.screenshot(path=after)
@@ -217,10 +228,12 @@ def execute_case(case: dict, target_url: str, output_dir: str, mode: str = "prog
             record["passedSteps"] = passed
             if record["errorCategory"]:
                 record["status"] = "failed"
-            elif passed < total:
-                # 有 skipped 步骤，但无失败：整体算 failed（skipped 不算通过）
-                record["status"] = "failed" if any(s["result"] == "failed" for s in step_results) else "passed"
-                record["status"] = "skipped" if any(s["result"] == "skipped" for s in step_results) and record["status"] == "passed" else record["status"]
+            elif any(s["result"] == "failed" for s in step_results):
+                record["status"] = "failed"
+            elif any(s["result"] == "skipped" for s in step_results):
+                record["status"] = "skipped"
+            else:
+                record["status"] = "passed"
             return record
     except Exception as e:  # noqa: BLE001 - 浏览器启动失败等
         logger.exception("执行用例失败: %s", case.get("id"))

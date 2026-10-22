@@ -216,18 +216,46 @@ def _parse_image_reviews(raw, images: list[dict]) -> list[dict]:
         if not analysis:
             continue
         seen.add(idx)
+        raw_verdict = str(item.get("verdict") or "").strip().lower()
         out.append(
             {
                 "imageIndex": idx,
                 "stepIndex": img["stepIndex"],
                 "label": img["label"],
                 "screenshot": img["path"],
-                "verdict": "suspect" if str(item.get("verdict") or "").lower() == "suspect" else "ok",
+                # 只接受模型明确给出的 ok；缺省、拼写错误或未知值一律按 suspect，
+                # 避免“没有分析结果”被误当成正常截图。
+                "verdict": "ok" if raw_verdict == "ok" else "suspect",
                 "analysis": analysis[:1000],
                 "bbox": _normalize_bbox(item.get("bbox"), img["path"]),
             }
         )
     return out
+
+
+def _normalize_verdict(
+    raw_verdict,
+    image_reviews: list[dict],
+    issues: list[dict],
+    image_count: int,
+) -> tuple[str, str | None]:
+    """汇总模型结论，任何异常证据都会把总 verdict 降级为 suspect。"""
+    verdict = str(raw_verdict or "").strip().lower()
+    reasons: list[str] = []
+    if verdict not in (VERDICT_OK, VERDICT_SUSPECT):
+        verdict = VERDICT_SUSPECT
+        reasons.append("模型未返回有效总结论")
+    if issues:
+        verdict = VERDICT_SUSPECT
+        reasons.append("审核发现具体问题")
+    if any(item.get("verdict") == VERDICT_SUSPECT for item in image_reviews):
+        verdict = VERDICT_SUSPECT
+        reasons.append("至少一张关键截图疑似异常")
+    reviewed = {item.get("imageIndex") for item in image_reviews}
+    if len(reviewed) < image_count:
+        verdict = VERDICT_SUSPECT
+        reasons.append(f"仅分析了 {len(reviewed)}/{image_count} 张关键截图")
+    return verdict, "；".join(reasons) or None
 
 
 def review_execution(case: dict, steps: list[dict], target_url: str) -> dict | None:
@@ -291,15 +319,19 @@ def review_execution(case: dict, steps: list[dict], target_url: str) -> dict | N
             "issues": [],
         }
 
-    verdict = str(data.get("verdict") or "").strip().lower()
-    if verdict not in (VERDICT_OK, VERDICT_SUSPECT):
-        verdict = VERDICT_SUSPECT
-    reason = str(data.get("reason") or "").strip()[:2000]
     image_reviews = _parse_image_reviews(data.get("images"), images)
     issues = _parse_issues(data.get("issues"), images)
+    verdict, downgrade_reason = _normalize_verdict(
+        data.get("verdict"), image_reviews, issues, len(images)
+    )
+    reason = str(data.get("reason") or "").strip()
+    if downgrade_reason:
+        reason = f"{reason}；{downgrade_reason}" if reason else downgrade_reason
     if issues:
         parts = [f"图{it['imageIndex']}：{it['problem']}" for it in issues]
         reason = (reason + "；" + "；".join(parts))[:2000]
+    else:
+        reason = reason[:2000]
 
     return {
         "verdict": verdict,

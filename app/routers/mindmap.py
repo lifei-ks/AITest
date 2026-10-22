@@ -41,8 +41,12 @@ def download(pid: str, format: str = "xmind", requirementId: str | None = None, 
 
 
 @router.get("/api/projects/{pid}/coverage/matrix")
-def matrix(pid: str, session: Session = Depends(get_session)):
-    return ok(coverage_service.coverage_matrix(session, pid))
+def matrix(
+    pid: str,
+    requirementId: str | None = None,
+    session: Session = Depends(get_session),
+):
+    return ok(coverage_service.coverage_matrix(session, pid, requirementId))
 
 
 @router.get("/api/projects/{pid}/report")

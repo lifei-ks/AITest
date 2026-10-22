@@ -84,7 +84,11 @@
         </el-table-column>
         <el-table-column label="执行状态" width="90">
           <template #default="{ row }">
-            <el-tag size="small" :type="execTag(row.executionStatus)">{{ execLabel(row.executionStatus) }}</el-tag>
+            <el-tooltip :content="row.executionStatusDescription || execDescription(row.executionStatus)" placement="top">
+              <el-tag size="small" :type="row.executionStatusTag || execTag(row.executionStatus)">
+                {{ row.executionStatusLabel || execLabel(row.executionStatus) }}
+              </el-tag>
+            </el-tooltip>
           </template>
         </el-table-column>
         <el-table-column label="操作" :width="isNarrow ? 155 : 210" :fixed="isNarrow ? false : 'right'">
@@ -225,6 +229,8 @@ const TYPES = [
 const STATUS = [
   { v: 'not_run', l: '未执行' }, { v: 'passed', l: '通过' },
   { v: 'failed', l: '失败' }, { v: 'skipped', l: '跳过' },
+  { v: 'running', l: '执行中' }, { v: 'needs_review', l: '待复核' },
+  { v: 'cancelled', l: '已取消' },
 ]
 const SELECTOR_TYPES = ['route', 'placeholder', 'text', 'label', 'role', 'css', 'xpath', 'testid']
 const EXEC_TEXT = {
@@ -234,6 +240,16 @@ const EXEC_TEXT = {
   skipped: '跳过',
   running: '执行中',
   needs_review: '待复核',
+  cancelled: '已取消',
+}
+const EXEC_DESCRIPTION = {
+  not_run: '用例尚未产生执行记录',
+  passed: '确定性检查通过，或证据经复核确认符合预期',
+  failed: '出现确定错误，或人工复核确认不符合预期',
+  skipped: '存在无法验证的步骤，缺少充分证据',
+  running: '正在浏览器中执行，尚无最终结论',
+  needs_review: '证据不足或 AI 判断有疑点，需要人工确认',
+  cancelled: '执行被中止，不能视为通过',
 }
 
 const tableRef = ref()
@@ -530,10 +546,14 @@ function execTag(s) {
     not_run: 'info',
     running: 'primary',
     needs_review: 'warning',
+    cancelled: 'info',
   }[s] || 'info'
 }
 function execLabel(s) {
   return EXEC_TEXT[s] || s
+}
+function execDescription(s) {
+  return EXEC_DESCRIPTION[s] || ''
 }
 
 const isNarrow = ref(false)

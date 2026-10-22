@@ -22,7 +22,7 @@ from sqlalchemy import select  # noqa: E402
 
 from app.database import Base, SessionLocal, get_engine  # noqa: E402
 from app.entity.models import CodeAnalysis, ExecutionRecord, ExecutionStep, Project, TestCase  # noqa: E402
-from app.service import analysis_service, execution_service, generation_service  # noqa: E402
+from app.service import analysis_service, coverage_service, execution_service, generation_service  # noqa: E402
 
 SAMPLE = str(Path(__file__).resolve().parent / "sample_src")
 TARGET = "http://127.0.0.1:8200"
@@ -66,11 +66,42 @@ def main() -> None:
             step_count = len(list(s.scalars(select(ExecutionStep))))
             shot_count = sum(1 for st in s.scalars(select(ExecutionStep)) if st.screenshot_after)
             video_count = len(list(s.scalars(select(ExecutionRecord).where(ExecutionRecord.video_path.isnot(None)))))
+            matrix = coverage_service.coverage_matrix(s, pid)
 
         print(f"\n通过率: {passed}/{len(results)} = {rate:.0%}")
         print(f"步骤数: {step_count}  截图数: {shot_count}  视频数: {video_count}")
+        print(
+            "覆盖矩阵: "
+            + " | ".join(
+                f"{name} 规划 {block['plannedCovered']}/{block['total']} "
+                f"执行 {block['executedCovered']}/{block['total']}"
+                for name, block in (
+                    ("接口", matrix["apiEndpoint"]),
+                    ("状态转换", matrix["stateTransition"]),
+                    ("业务规则", matrix["businessRule"]),
+                )
+            )
+        )
 
-        ok = gen["kept"] >= 12 and rate >= 0.9 and shot_count >= step_count and video_count >= len(results)
+        coverage_blocks = (
+            matrix["apiEndpoint"],
+            matrix["stateTransition"],
+            matrix["businessRule"],
+        )
+        coverage_ok = all(
+            block["total"] > 0
+            and block["plannedCovered"] > 0
+            and block["executedCovered"] > 0
+            and 0 <= block["executedRate"] <= block["plannedRate"] <= 1
+            for block in coverage_blocks
+        )
+        ok = (
+            gen["kept"] >= 12
+            and rate >= 0.9
+            and shot_count >= step_count
+            and video_count >= len(results)
+            and coverage_ok
+        )
         print("\nRESULT:", "PASS" if ok else "FAIL")
     finally:
         proc.terminate()

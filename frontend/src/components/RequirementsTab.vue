@@ -81,13 +81,17 @@
           <div class="section-head">
             <span>需求文档</span>
             <div class="doc-actions">
-              <el-upload :show-file-list="false" accept=".md,.txt,.pdf,.docx" :before-upload="onUpload" :disabled="uploading">
-                <el-button size="small" :loading="uploading">上传文档</el-button>
-              </el-upload>
               <el-button size="small" type="primary" :loading="saving" :disabled="!dirty" @click="saveDoc">保存内容</el-button>
               <span class="muted">{{ prd.length }} 字符</span>
             </div>
           </div>
+          <PrdDropUpload
+            ref="prdDropRef"
+            title="拖拽需求文档到这里上传"
+            hint="支持 .md、.txt、.pdf、.docx；上传后会替换当前文档并作废旧测试点"
+            :disabled="uploading"
+            @update:model-value="onUpload"
+          />
           <el-input
             v-model="prd"
             type="textarea"
@@ -145,6 +149,15 @@
         <el-form-item v-if="dialogMode === 'create'" label="需求内容">
           <el-input v-model="form.content" type="textarea" :rows="6" placeholder="可直接粘贴需求文档，也可以创建后上传文件" />
         </el-form-item>
+        <el-form-item v-if="dialogMode === 'create'" label="上传文件">
+          <PrdDropUpload
+            ref="reqMetaDropRef"
+            v-model="requirementFile"
+            title="拖拽需求文档"
+            hint="可选；创建版本后自动上传，支持 .md、.txt、.pdf、.docx"
+            :disabled="savingMeta"
+          />
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
@@ -167,6 +180,7 @@ import {
   updateRequirement,
   uploadRequirementPrd,
 } from '../api/requirements'
+import PrdDropUpload from './PrdDropUpload.vue'
 
 const props = defineProps({
   projectId: { type: String, required: true },
@@ -190,12 +204,15 @@ const prd = ref('')
 const dirty = ref(false)
 const saving = ref(false)
 const uploading = ref(false)
+const prdDropRef = ref()
 const analyzing = ref(false)
 const analyzeMode = ref('auto')
 
 const dialogVisible = ref(false)
 const dialogMode = ref('create')
 const savingMeta = ref(false)
+const requirementFile = ref(null)
+const reqMetaDropRef = ref()
 const form = ref({ name: '', version: '', content: '' })
 
 const selectedId = computed({
@@ -339,6 +356,8 @@ async function saveDoc() {
 
 function openCreate() {
   dialogMode.value = 'create'
+  requirementFile.value = null
+  reqMetaDropRef.value?.clear()
   const next = requirements.value.length ? `V${requirements.value.length + 1}.0` : 'V1.0'
   form.value = { name: '', version: next, content: '' }
   dialogVisible.value = true
@@ -347,6 +366,8 @@ function openCreate() {
 function openEdit() {
   if (!current.value) return
   dialogMode.value = 'edit'
+  requirementFile.value = null
+  reqMetaDropRef.value?.clear()
   form.value = { name: current.value.name, version: current.value.version, content: '' }
   dialogVisible.value = true
 }
@@ -362,10 +383,23 @@ async function saveMeta() {
         version: form.value.version.trim(),
         content: form.value.content || '',
       })
+      let uploadFailed = false
+      if (requirementFile.value) {
+        try {
+          await uploadRequirementPrd(created.id, requirementFile.value)
+        } catch {
+          uploadFailed = true
+        }
+      }
+      requirementFile.value = null
       dialogVisible.value = false
-      await loadList()
       selectedId.value = created.id
-      ElMessage.success('已创建需求版本')
+      await loadList()
+      if (uploadFailed) {
+        ElMessage.warning('需求版本已创建，但文件上传失败，请重新上传')
+      } else {
+        ElMessage.success('已创建需求版本')
+      }
     } else {
       await updateRequirement(selectedId.value, { name: form.value.name.trim(), version: form.value.version.trim() })
       dialogVisible.value = false
@@ -410,15 +444,17 @@ async function analyze() {
 }
 
 async function onUpload(file) {
+  if (!file || !selectedId.value || uploading.value) return
   uploading.value = true
   try {
-    await uploadRequirementPrd(selectedId.value, file)
+    const updated = await uploadRequirementPrd(selectedId.value, file)
+    if (updated?.content != null) prd.value = updated.content
     ElMessage.success(`已解析 ${file.name} 并载入`)
     await loadList()
   } finally {
     uploading.value = false
+    prdDropRef.value?.clear()
   }
-  return false
 }
 
 onMounted(loadList)
@@ -428,6 +464,9 @@ onBeforeUnmount(stopPoll)
 <style scoped>
 .req-tab {
   min-height: 320px;
+}
+.prd-drop {
+  margin-bottom: 12px;
 }
 .req-layout {
   display: flex;

@@ -95,7 +95,7 @@ def build_report(
     for r in records:
         r.steps = list(session.scalars(select(ExecutionStep).where(ExecutionStep.execution_id == r.id).order_by(ExecutionStep.step_index)))
 
-    matrix = coverage_matrix(session, pid)
+    matrix = coverage_matrix(session, pid, requirement_id)
 
     from datetime import datetime
 
