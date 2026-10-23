@@ -19,6 +19,7 @@ from typing import Any
 
 from app.analyzer.models import BackendResult, FrontendResult
 from app.agent.state_machine_agent import bfs_paths
+from app.agent.quality_gate import is_compound_expected, quoted_anchors
 
 # 字段名 → 合法测试值（启发式，兜底用通用值）
 FIELD_SAMPLE: dict[str, str] = {
@@ -420,11 +421,50 @@ _POINT_TYPE = {
 }
 
 
+_SUCCESS_HINTS = ("成功", "可创建", "可提交", "可保存", "允许", "通过")
+_ERROR_HINTS = ("不能", "失败", "错误", "超出", "超过", "不正确", "非法", "为空", "必填", "无效", "未通过", "不通过")
+# 同一子句里出现这些词时，「成功/通过」是反讽或前置条件，不能当作正例预期
+_NEGATED_SUCCESS_WORDS = ("未通过", "不通过", "无法", "禁止", "不能", "失败", "错误")
+
+
+def _expects_success(text: str) -> bool:
+    """按子句判断是否描述了成功结果，避免被「未通过」「不能成功」误导。"""
+    for clause in re.split(r"[；;。]", text or ""):
+        if not any(w in clause for w in _SUCCESS_HINTS):
+            continue
+        if any(w in clause for w in _NEGATED_SUCCESS_WORDS):
+            continue
+        return True
+    return False
+
+
+def _atomic_expected(text: str) -> str:
+    """把单个预期收敛为一个可断言文案；复合预期（多场景/多结果）返回空串。
+
+    - 复合预期不能压成单条断言，交由上层拆成多条用例
+    - 只带一个「」锚点时取锚点内文案，去掉「提交后提示」这类前缀
+    """
+    raw = (text or "").strip()
+    if not raw or is_compound_expected(raw):
+        return ""
+    anchors = quoted_anchors(raw)
+    if len(anchors) == 1:
+        return anchors[0]
+    return raw.strip("「」").strip()
+
+
+def _fallback_anchor(text: str) -> str:
+    """极端兜底：复合预期只能保留一个锚点时，取最后一个（通常是错误提示）。"""
+    anchors = quoted_anchors(text)
+    if anchors:
+        return anchors[-1]
+    return re.split(r"[；;]", (text or "").strip())[0].strip().strip("「」")
+
+
 def _assert_expected(order: int, text: str) -> dict:
-    """预期文案断言：统一用「」锚定，已带引号则不重复包裹。"""
-    anchor = (text or "").strip()
-    if anchor and not (anchor.startswith("「") and anchor.endswith("」")):
-        anchor = f"「{anchor}」"
+    """预期文案断言：一个断言只留一个「」锚点，避免嵌套引号让执行器切错文案。"""
+    anchor_text = _atomic_expected(text) or _fallback_anchor(text)
+    anchor = f"「{anchor_text}」" if anchor_text else ""
     return _step(order, "state_assert", f"验证{anchor}", "", "text", anchor, expected=anchor)
 
 
@@ -472,10 +512,35 @@ def _point_module(point: dict, page, backend: BackendResult) -> str:
 
 
 def _point_expected(point: dict, fallback: str) -> str:
-    expected = (point.get("expected") or "").strip()
-    if expected:
-        return expected.strip("「」")
-    return fallback
+    """测试点的单条可断言预期；复合预期不使用，改用场景兜底文案。"""
+    return _atomic_expected(str(point.get("expected") or "")) or fallback
+
+
+def _boundary_expect(point: dict, *, valid: bool, success: str, fallback: str) -> str:
+    """从测试点预期中挑出与当前边界场景匹配的单条可见文案。"""
+    raw = str(point.get("expected") or "").strip()
+    atomic = _atomic_expected(raw)
+    if atomic:
+        # 单预期只在语义与当前场景一致时采用；成功/失败混写时改用场景兜底
+        has_error = any(w in raw for w in _ERROR_HINTS)
+        if (valid and _expects_success(raw) and not has_error) or (
+            not valid and has_error and not _expects_success(raw)
+        ):
+            return atomic
+        return success if valid else fallback
+    hints = _SUCCESS_HINTS if valid else _ERROR_HINTS
+    for clause in re.split(r"[；;。]", raw):
+        if not clause.strip():
+            continue
+        if valid and not _expects_success(clause):
+            continue
+        # 越界场景不能被成功子句误导（如「…可创建并提示「订单创建成功」」）
+        if not valid and (_expects_success(clause) or not any(w in clause for w in hints)):
+            continue
+        anchors = quoted_anchors(clause)
+        if anchors:
+            return anchors[0]
+    return success if valid else fallback
 
 
 def _finish_point_case(case: GeneratedCase, point: dict, page, backend: BackendResult) -> GeneratedCase:
@@ -493,11 +558,13 @@ def _finish_point_case(case: GeneratedCase, point: dict, page, backend: BackendR
     refs["testPointIds"] = [point.get("id")] if point.get("id") else []
     case.coverage_refs = refs
     if point.get("expected"):
-        expected = str(point["expected"]).strip().strip("「」")
-        case.expected_results = [expected]
-        last = case.structured_steps[-1] if case.structured_steps else None
-        if last and last.get("type") == "state_assert":
-            case.structured_steps[-1] = _assert_expected(last.get("order", len(case.structured_steps)), expected)
+        expected = _atomic_expected(str(point["expected"]))
+        # 复合预期不能覆盖模板已拆好的单场景断言（如 20字符成功 / 21字符报错）
+        if expected:
+            case.expected_results = [expected]
+            last = case.structured_steps[-1] if case.structured_steps else None
+            if last and last.get("type") == "state_assert":
+                case.structured_steps[-1] = _assert_expected(last.get("order", len(case.structured_steps)), expected)
     case.steps = [s.get("action", "") for s in case.structured_steps if s.get("action")][:8]
     return case
 
@@ -559,6 +626,7 @@ def generate_rule_cases_for_points(
         category = point.get("category") or "functional"
         page = _page_for_point(point, frontend)
         fields = _pick_fields(point, page)
+        page_fields = _page_fields(page)
         text = f"{point.get('title', '')} {point.get('description', '')}"
         # 测试点名里明确提到的字段优先（如「手机号格式不正确」→ 只针对 phone）
         mentioned = [f for f in fields if (f.label and f.label in text) or (f.prop and f.prop in text)]
@@ -591,10 +659,11 @@ def generate_rule_cases_for_points(
                 steps = [_open_step(page.route, page.name, order)]
                 order += 1
                 test_data = {}
-                for other in fields:
+                # 填齐页面上的其他必填项，保证只有当前字段触发校验错误
+                for other in page_fields:
                     if other is f:
                         continue
-                    if _is_required(other, required_names) or len(fields) <= 3:
+                    if _is_required(other, required_names) or len(page_fields) <= 3:
                         val = _sample_value(other.prop or other.label)
                         steps.append(_fill_step(other, order, val))
                         test_data[other.prop or other.label] = val
@@ -627,7 +696,7 @@ def generate_rule_cases_for_points(
             if made:
                 continue
 
-        # ---- 边界：测试点字段的约束 ----
+        # ---- 边界：测试点字段的约束；合法边界与越界值拆成两条用例 ----
         if category == "boundary" and page is not None and fields:
             constraint_map: dict[str, list] = {}
             for e in backend.entities:
@@ -637,6 +706,10 @@ def generate_rule_cases_for_points(
             preferred = [f for f in fields if (f.prop in constraint_map) or (f.label in constraint_map)]
             preferred = [f for f in preferred if f in mentioned] or preferred
             target_fields = preferred
+            raw_expect = str(point.get("expected") or "")
+            # 复合边界点（合法+越界）拆成两条；只有越界或只有合法时只出一条
+            wants_valid = _expects_success(raw_expect)
+            wants_invalid = any(w in raw_expect for w in _ERROR_HINTS) or not wants_valid
             made = False
             for f in target_fields[:2]:
                 cons = constraint_map.get(f.prop) or constraint_map.get(f.label) or []
@@ -644,53 +717,96 @@ def generate_rule_cases_for_points(
                     continue
                 c = cons[0]
                 label = f.label or f.prop
+                multi_target = len(target_fields) > 1
+
+                def suffix(text: str, _label: str = label, _multi: bool = multi_target) -> str:
+                    return f"（{_label}{text}）" if _multi else f"（{text}）"
+
                 if c.rule == "size":
-                    value = "超" * (int(c.value) + 1)
-                    expect = _point_expected(point, f"{label}不能超过{c.value}个字符")
+                    limit = int(c.value)
+                    default_error = f"{label}不能超过{c.value}个字符"
+                    scenarios = [
+                        ("valid", "合" * limit, suffix(f"{limit}字符合法")),
+                        ("invalid", "超" * (limit + 1), suffix(f"{limit + 1}字符超长")),
+                    ]
                 elif c.rule == "pattern":
-                    value = "123"
-                    expect = _point_expected(point, f"{label}格式不正确")
-                else:
-                    value = str(int(c.value) + 1) if c.rule == "max" else str(int(c.value) - 1)
-                    expect = _point_expected(point, f"{label}超出范围")
-                order = 1
-                steps = [_open_step(page.route, page.name, order)]
-                order += 1
-                for other in fields:
-                    if other is f:
+                    default_error = f"{label}格式不正确"
+                    scenarios = [("invalid", "123", suffix("格式错误"))]
+                    # 只有已知样本能保证满足正则时才生成合法值用例，避免造出必失败的正例
+                    sample_key = (f.prop or label or "").lower().replace("-", "_")
+                    if sample_key in FIELD_SAMPLE:
+                        scenarios.insert(0, ("valid", FIELD_SAMPLE[sample_key], suffix("格式合法")))
+                elif c.rule == "max":
+                    limit = int(c.value)
+                    default_error = f"{label}超出范围"
+                    scenarios = [
+                        ("valid", str(limit), suffix(f"取上限{limit}")),
+                        ("invalid", str(limit + 1), suffix("超过上限")),
+                    ]
+                else:  # min
+                    limit = int(c.value)
+                    default_error = f"{label}超出范围"
+                    scenarios = [
+                        ("valid", str(limit), suffix(f"取下限{limit}")),
+                        ("invalid", str(limit - 1), suffix("低于下限")),
+                    ]
+
+                for kind, value, scenario_suffix in scenarios:
+                    if kind == "valid" and not wants_valid:
                         continue
-                    if _is_required(other, required_names):
-                        val = _sample_value(other.prop or other.label)
-                        steps.append(_fill_step(other, order, val))
-                        order += 1
-                steps.append(_fill_step(f, order, value))
-                order += 1
-                steps.append(_submit_step(order))
-                order += 1
-                steps.append(_assert_expected(order, expect))
-                case = GeneratedCase(
-                    title=(point.get("title") or f"{label}边界校验")[:255],
-                    module=_point_module(point, page, backend),
-                    type="boundary",
-                    priority=point.get("priority") or "P1",
-                    preconditions=[f"已进入{page.name}页面"],
-                    steps=[s["action"] for s in steps],
-                    expected_results=[expect],
-                    structured_steps=steps,
-                    test_data={f.prop or label: value},
-                    coverage_refs={"endpointIds": [], "transitionIds": [], "ruleIds": []},
-                    test_point_id=point.get("id"),
-                )
-                if len(target_fields) > 1:
-                    case.title = f"{case.title}（{label}）"[:255]
-                cases.append(_finish_point_case(case, point, page, backend))
-                made = True
+                    if kind == "invalid" and not wants_invalid:
+                        continue
+                    expect = _boundary_expect(
+                        point,
+                        valid=(kind == "valid"),
+                        success=success,
+                        fallback=default_error,
+                    )
+                    order = 1
+                    steps = [_open_step(page.route, page.name, order)]
+                    order += 1
+                    test_data = {}
+                    # 填齐其他必填项：合法边界要能真正提交成功，越界也只让目标字段报错
+                    for other in page_fields:
+                        if other is f:
+                            continue
+                        if _is_required(other, required_names):
+                            val = _sample_value(other.prop or other.label)
+                            steps.append(_fill_step(other, order, val))
+                            test_data[other.prop or other.label] = val
+                            order += 1
+                    steps.append(_fill_step(f, order, value))
+                    test_data[f.prop or label] = value
+                    order += 1
+                    steps.append(_submit_step(order))
+                    order += 1
+                    steps.append(_assert_expected(order, expect))
+                    title = point.get("title") or f"{label}边界校验"
+                    if len(scenarios) > 1:
+                        title = f"{title[: 255 - len(scenario_suffix)]}{scenario_suffix}"
+                    case = GeneratedCase(
+                        title=title[:255],
+                        module=_point_module(point, page, backend),
+                        type="boundary",
+                        priority=point.get("priority") or "P1",
+                        preconditions=[f"已进入{page.name}页面"],
+                        steps=[s["action"] for s in steps],
+                        expected_results=[expect],
+                        structured_steps=steps,
+                        test_data=test_data,
+                        coverage_refs={"endpointIds": [], "transitionIds": [], "ruleIds": []},
+                        test_point_id=point.get("id"),
+                    )
+                    cases.append(_finish_point_case(case, point, page, backend))
+                    made = True
             if made:
                 continue
 
         # ---- 正例 / 接口 / 权限：按页面填具体参数并提交 ----
         if page is not None:
-            fill_fields = [f for f in fields if _is_required(f, required_names)] or fields
+            # 必须填齐页面全部必填字段，否则正例/合法边界无法真正提交成功
+            fill_fields = [f for f in page_fields if _is_required(f, required_names) or f in fields]
+            fill_fields = fill_fields or fields
             expect = _point_expected(point, success)
             order = 1
             steps = [_open_step(page.route, page.name, order)]

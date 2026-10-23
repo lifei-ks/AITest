@@ -87,6 +87,10 @@ def _steps_text(steps: list[dict]) -> str:
     lines = []
     for idx, s in enumerate(steps, 1):
         line = f"{idx}. [{s.get('stepType')}] {s.get('action', '')}（结果：{s.get('result')}）"
+        if s.get("target"):
+            line += f" 目标：{s.get('target')}"
+        if s.get("selectorUsed"):
+            line += f" 执行证据：{s.get('selectorUsed')}"
         if s.get("error"):
             line += f" 错误：{s.get('error')}"
         lines.append(line)
@@ -111,9 +115,20 @@ def _build_prompt(case: dict, steps: list[dict], target_url: str, images: list[d
 审核要求：
 1. 只依据截图中可见的内容和步骤记录判断，不要臆测未展示的信息。
 2. 若截图出现报错提示、空白页、登录页、与预期不符的页面/文案/数据，判 suspect。
-3. 若截图不足以证明预期结果（例如关键结果没截到、图片模糊），也判 suspect，不要放过。
-4. 只有截图明确展示了预期结果（文案、列表数据、状态变化等）才判 ok。
-5. 不要因为步骤结果写着 passed 就直接判 ok，必须自己看截图。
+3. 浏览器刷新是页面动作，截图通常看不到浏览器刷新过程。若步骤记录中明确出现
+   「浏览器已刷新」或 `performance.navigation.type=reload`，应把这视为刷新动作
+   的客观证据；此时截图只用于验证刷新后的页面状态，不要因为截图无法展示
+   “正在刷新”就判 suspect。
+4. 若用例预期要求刷新，但步骤记录既没有刷新动作，也没有 Navigation Timing 证据，
+   才应因缺少刷新验证判 suspect。
+5. 若截图不足以证明其他预期结果（例如关键结果没截到、图片模糊），也判 suspect，不要放过。
+6. 只有截图明确展示了预期结果（文案、列表数据、状态变化等）才判 ok。
+7. 不要因为步骤结果写着 passed 就直接判 ok，必须自己看截图。
+
+确定性断言证据的补充规则：
+- 若步骤记录包含「断言证据：文本锚点命中」或「断言证据：URL 命中」，说明 Playwright 已做过
+  精确检查。除非截图出现矛盾（报错、空白页、错误页面、相反状态），不要仅因截图分辨率、
+  文案在截图中不够醒目或“截图没有完整展示该文案”就判 suspect。
 
 请对每一张图片都给出单独分析（images 数组，每张图一条），方便人工查阅：
 - image：图片编号（从 1 开始）

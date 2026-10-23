@@ -43,6 +43,15 @@
             <el-button :loading="importing">导入 CSV</el-button>
           </el-upload>
           <el-button :loading="exporting" @click="onExport">导出 CSV</el-button>
+          <el-button
+            type="warning"
+            plain
+            :loading="aiReviewing"
+            :disabled="!rows.length"
+            @click="onAiReview"
+          >
+            AI 质检{{ selection.length ? `(${selection.length})` : '' }}
+          </el-button>
           <el-button type="success" :loading="batchExecuting" @click="onExecuteAll">全部执行</el-button>
           <el-button v-if="selection.length" type="primary" :loading="batchExecuting" @click="onBatchExecute">
             批量执行({{ selection.length }})
@@ -82,6 +91,25 @@
             >{{ row.qualityScore }}</el-tag>
           </template>
         </el-table-column>
+        <el-table-column v-if="!isNarrow" label="AI 质检" width="104">
+          <template #default="{ row }">
+            <el-tooltip
+              v-if="caseReviewMap[row.id]"
+              :content="caseReviewMap[row.id].reason || reviewLabel(caseReviewMap[row.id].verdict)"
+              placement="top"
+            >
+              <el-tag
+                size="small"
+                :type="reviewTag(caseReviewMap[row.id].verdict)"
+                class="review-link"
+                @click="openAiReviewDialog(row.id)"
+              >
+                {{ reviewLabel(caseReviewMap[row.id].verdict) }}
+              </el-tag>
+            </el-tooltip>
+            <span v-else class="muted">—</span>
+          </template>
+        </el-table-column>
         <el-table-column label="执行状态" width="90">
           <template #default="{ row }">
             <el-tooltip :content="row.executionStatusDescription || execDescription(row.executionStatus)" placement="top">
@@ -111,6 +139,64 @@
         @current-change="load"
         @size-change="onSizeChange"
       />
+
+      <!-- AI 用例质检与修复 -->
+      <el-dialog
+        v-model="aiReviewVisible"
+        title="AI 用例质检与修复"
+        width="860px"
+        top="5vh"
+        destroy-on-close
+      >
+        <el-alert
+          :title="aiReviewSummary"
+          :type="aiReviewSummaryType"
+          :closable="false"
+          show-icon
+          class="mb"
+        />
+        <div v-for="result in aiReviewResults" :key="result.caseId" class="ai-review-item">
+          <div class="review-head">
+            <div class="review-title">
+              <strong>{{ result.title }}</strong>
+              <span class="muted">{{ result.caseId }}</span>
+            </div>
+            <div class="review-actions">
+              <el-tag size="small" :type="reviewTag(result.verdict)">
+                {{ reviewLabel(result.verdict) }}
+              </el-tag>
+              <el-button
+                v-if="result.verdict !== 'ok' && result.verdict !== 'unavailable'"
+                size="small"
+                type="primary"
+                plain
+                :loading="aiFixingId === result.caseId"
+                @click="onAiRepair(result)"
+              >
+                AI 修复
+              </el-button>
+            </div>
+          </div>
+          <p class="review-reason">{{ result.reason }}</p>
+          <p v-if="result.model" class="muted review-model">模型：{{ result.model }}</p>
+          <div v-if="result.repairSummary" class="repair-summary">
+            <el-tag size="small" type="success">已修复</el-tag>
+            <span>{{ result.repairSummary }}</span>
+          </div>
+          <div v-if="result.issues?.length" class="issue-list">
+            <div v-for="(issue, index) in result.issues" :key="index" class="issue-item">
+              <el-tag size="small" :type="issueTag(issue.severity)">
+                {{ issueLabel(issue.severity) }}
+              </el-tag>
+              <div class="issue-body">
+                <div class="issue-problem">{{ issue.problem }}</div>
+                <div v-if="issue.suggestion" class="issue-suggestion">建议：{{ issue.suggestion }}</div>
+                <div v-if="issue.evidence" class="issue-evidence">依据：{{ issue.evidence }}</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </el-dialog>
 
       <!-- 编辑抽屉 -->
       <el-drawer v-model="editVisible" title="编辑用例" size="760px" :close-on-click-modal="false">
@@ -200,7 +286,8 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  batchDelete, deleteTestcase, exportCsv, importCsv, listTestcases, listVersions, rollbackVersion, updateTestcase,
+  aiFixCase, aiReviewCases, batchDelete, deleteTestcase, exportCsv, importCsv, listTestcases, listVersions,
+  rollbackVersion, updateTestcase,
 } from '../api/testcases'
 import { batchExecute, executeCase } from '../api/executions'
 import { listRequirements } from '../api/requirements'
@@ -288,6 +375,12 @@ const versionVisible = ref(false)
 const versions = ref([])
 const versionsLoading = ref(false)
 const versionCaseId = ref('')
+const aiReviewing = ref(false)
+const aiFixingId = ref('')
+const aiReviewVisible = ref(false)
+const aiReviewResults = ref([])
+const caseReviewMap = ref({})
+let aiReviewRequestId = 0
 
 const queryParams = () => ({
   page: page.value,
@@ -343,6 +436,105 @@ function applyFilter() {
 function onSizeChange() {
   page.value = 1
   load()
+}
+
+const aiReviewSummary = computed(() => {
+  const results = aiReviewResults.value
+  if (!results.length) return '暂无质检结果'
+  const ok = results.filter((item) => item.verdict === 'ok').length
+  const suspect = results.filter((item) => item.verdict === 'suspect').length
+  const failed = results.filter((item) => item.verdict === 'fail').length
+  const unavailable = results.filter((item) => item.verdict === 'unavailable').length
+  return `AI 质检完成：通过 ${ok}，疑似异常 ${suspect}，失败 ${failed}${
+    unavailable ? `，不可用 ${unavailable}` : ''
+  }`
+})
+const aiReviewSummaryType = computed(() => {
+  const results = aiReviewResults.value
+  if (!results.length) return 'info'
+  if (results.some((item) => item.verdict === 'fail')) return 'error'
+  if (results.some((item) => item.verdict === 'suspect')) return 'warning'
+  if (results.every((item) => item.verdict === 'ok')) return 'success'
+  return 'info'
+})
+
+function reviewTag(verdict) {
+  return { ok: 'success', suspect: 'warning', fail: 'danger', unavailable: 'info' }[verdict] || 'info'
+}
+function reviewLabel(verdict) {
+  return {
+    ok: '通过',
+    suspect: '疑似异常',
+    fail: '失败',
+    unavailable: '不可用',
+  }[verdict] || '未质检'
+}
+function issueTag(severity) {
+  return { blocker: 'danger', warning: 'warning', info: 'info' }[severity] || 'info'
+}
+function issueLabel(severity) {
+  return { blocker: '阻断', warning: '警告', info: '提示' }[severity] || severity
+}
+
+async function onAiReview() {
+  const requestId = ++aiReviewRequestId
+  const ids = selection.value.length
+    ? selection.value.map((row) => row.id)
+    : rows.value.map((row) => row.id)
+  if (!ids.length) return
+  if (ids.length > 20) return ElMessage.warning('单次最多质检 20 条，请先筛选或分页选择')
+  try {
+    await ElMessageBox.confirm(
+      `将调用 AI 质检 ${ids.length} 条用例，依据是当前需求文档和源码分析事实。是否继续？`,
+      'AI 用例质检',
+      { type: 'warning', confirmButtonText: '开始质检', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+  aiReviewing.value = true
+  try {
+    const data = await aiReviewCases(projectId.value, ids)
+    if (requestId !== aiReviewRequestId) return
+    aiReviewResults.value = data.results || []
+    const nextMap = { ...caseReviewMap.value }
+    aiReviewResults.value.forEach((result) => {
+      nextMap[result.caseId] = result
+    })
+    caseReviewMap.value = nextMap
+    aiReviewVisible.value = true
+  } finally {
+    aiReviewing.value = false
+  }
+}
+
+function openAiReviewDialog(caseId) {
+  if (caseId && !aiReviewResults.value.some((result) => result.caseId === caseId)) {
+    const item = caseReviewMap.value[caseId]
+    if (item) aiReviewResults.value = [item]
+  }
+  aiReviewVisible.value = true
+}
+
+async function onAiRepair(result) {
+  if (!result?.caseId) return
+  aiFixingId.value = result.caseId
+  try {
+    const data = await aiFixCase(projectId.value, result.caseId, result.issues || [])
+    result.repairSummary = data.summary || 'AI 修复完成并通过源码事实校验'
+    result.verdict = 'ok'
+    result.reason = result.repairSummary
+    result.issues = []
+    caseReviewMap.value = {
+      ...caseReviewMap.value,
+      [result.caseId]: { ...result },
+    }
+    const index = rows.value.findIndex((row) => row.id === result.caseId)
+    if (index >= 0) rows.value[index] = data.testCase
+    ElMessage.success('AI 修复完成，已生成新版本')
+  } finally {
+    aiFixingId.value = ''
+  }
 }
 
 async function onExecute(row) {
@@ -575,6 +767,11 @@ watch(projectId, async () => {
   selection.value = []
   versionTouched.value = false
   filters.requirementId = ''
+  aiReviewRequestId += 1
+  aiReviewResults.value = []
+  caseReviewMap.value = {}
+  aiReviewVisible.value = false
+  aiFixingId.value = ''
   await loadRequirements()
   load()
 })
@@ -613,9 +810,83 @@ watch(() => props.refreshKey, async () => {
 .actions {
   margin-left: auto;
 }
+.mb {
+  margin-bottom: 12px;
+}
 .pager {
   margin-top: 12px;
   justify-content: flex-end;
+}
+.review-link {
+  cursor: pointer;
+}
+.ai-review-item {
+  padding: 14px 0;
+  border-bottom: 1px solid var(--el-border-color-lighter);
+}
+.ai-review-item:last-child {
+  border-bottom: none;
+}
+.review-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+.review-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.review-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+.review-reason {
+  margin: 8px 0;
+  color: var(--el-text-color-regular);
+  line-height: 1.6;
+}
+.review-model,
+.issue-evidence {
+  font-size: 12px;
+}
+.repair-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  color: var(--el-color-success);
+}
+.issue-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.issue-item {
+  display: flex;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 6px;
+  background: var(--el-fill-color-lighter);
+}
+.issue-body {
+  min-width: 0;
+}
+.issue-problem,
+.issue-suggestion {
+  line-height: 1.6;
+}
+.issue-suggestion {
+  color: var(--el-text-color-secondary);
+}
+.issue-evidence {
+  margin-top: 4px;
+  color: var(--el-text-color-secondary);
 }
 @media (max-width: 900px) {
   .page-layout {

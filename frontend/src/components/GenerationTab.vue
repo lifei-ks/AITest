@@ -83,7 +83,7 @@
         type="info"
         :closable="false"
         class="mb"
-        :title="`丢弃原因：无预期 ${stat.dropReasons.no_expected || 0}，低分 ${stat.dropReasons.low_score || 0}，去重 ${stat.dropReasons.duplicate || 0}`"
+        :title="`丢弃原因：无预期 ${stat.dropReasons.no_expected || 0}，复合预期 ${stat.dropReasons.compound_expected || 0}，多输入 ${stat.dropReasons.multiple_inputs || 0}，低分 ${stat.dropReasons.low_score || 0}，去重 ${stat.dropReasons.duplicate || 0}`"
       />
 
       <!-- 测试点预览 -->

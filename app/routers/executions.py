@@ -7,7 +7,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.common.errors import BizError
@@ -80,9 +80,9 @@ def batch_execute(pid: str, body: BatchExecuteBody):
 def list_executions(pid: str, page: int = Query(1, ge=1), pageSize: int = Query(20, ge=1, le=200),
                     status: str | None = None, batchId: str | None = None,
                     requirementId: str | None = None,
+                    testCaseId: str | None = None,
+                    groupBy: str = Query("case", pattern="^(case|execution)$"),
                     session: Session = Depends(get_session)):
-    from sqlalchemy import func
-
     # 历史记录没有版本快照时按当前映射补齐（幂等）
     execution_service.backfill_execution_requirements(session, pid)
 
@@ -91,6 +91,8 @@ def list_executions(pid: str, page: int = Query(1, ge=1), pageSize: int = Query(
         stmt = stmt.where(ExecutionRecord.status == status)
     if batchId:
         stmt = stmt.where(ExecutionRecord.batch_id == batchId)
+    if testCaseId:
+        stmt = stmt.where(ExecutionRecord.test_case_id == testCaseId)
     if requirementId:
         meta_stmt = select(ExecutionRequirement.execution_id).where(
             ExecutionRequirement.project_id == pid
@@ -101,14 +103,54 @@ def list_executions(pid: str, page: int = Query(1, ge=1), pageSize: int = Query(
             meta_stmt = meta_stmt.where(ExecutionRequirement.requirement_id == requirementId)
         meta_ids = list(session.scalars(meta_stmt))
         stmt = stmt.where(ExecutionRecord.id.in_(meta_ids or ["__none__"]))
-    total = session.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    records = list(session.scalars(stmt.order_by(ExecutionRecord.start_time.desc()).offset((page - 1) * pageSize).limit(pageSize)))
+
+    if groupBy == "case":
+        filtered = stmt.subquery()
+        ranked = (
+            select(
+                filtered.c.id.label("id"),
+                filtered.c.start_time.label("start_time"),
+                func.row_number().over(
+                    partition_by=filtered.c.test_case_id,
+                    order_by=[
+                        filtered.c.start_time.desc(),
+                        filtered.c.id.desc(),
+                    ],
+                ).label("row_number"),
+            )
+            .subquery()
+        )
+        ranked_stmt = select(ranked.c.id).where(ranked.c.row_number == 1)
+        # 先按 status/batch/requirement 过滤候选记录，再对每个用例取其中最新一条。
+        total = session.scalar(
+            select(func.count())
+            .select_from(ranked)
+            .where(ranked.c.row_number == 1)
+        ) or 0
+        latest_ids = list(session.scalars(
+            ranked_stmt.order_by(ranked.c.start_time.desc())
+            .offset((page - 1) * pageSize)
+            .limit(pageSize)
+        ))
+        records = list(session.scalars(
+            select(ExecutionRecord).where(ExecutionRecord.id.in_(latest_ids or ["__none__"]))
+        ))
+        records.sort(key=lambda item: item.start_time, reverse=True)
+    else:
+        total = session.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+        records = list(session.scalars(
+            stmt.order_by(ExecutionRecord.start_time.desc())
+            .offset((page - 1) * pageSize)
+            .limit(pageSize)
+        ))
+
     items = []
     for record in records:
         status_meta = execution_status_meta(record.status)
         category_meta = error_category_meta(record.error_category)
         items.append({
             "id": record.id,
+            "executionId": record.id,
             "testCaseId": record.test_case_id,
             "testCaseTitle": record.test_case_title,
             "status": record.status,
@@ -117,6 +159,8 @@ def list_executions(pid: str, page: int = Query(1, ge=1), pageSize: int = Query(
             "statusTag": status_meta["tag"],
             "mode": record.mode,
             "durationMs": record.duration_ms,
+            "passedSteps": record.passed_steps,
+            "totalSteps": record.total_steps,
             "startTime": to_utc_iso(record.start_time),
             "batchId": record.batch_id,
             "errorCategory": record.error_category,
@@ -124,6 +168,14 @@ def list_executions(pid: str, page: int = Query(1, ge=1), pageSize: int = Query(
             "errorCategoryDescription": category_meta["description"],
             "errorCategoryTag": category_meta["tag"],
         })
+    if groupBy == "case" and items:
+        case_counts = dict(session.execute(
+            select(ExecutionRecord.test_case_id, func.count())
+            .where(ExecutionRecord.project_id == pid)
+            .group_by(ExecutionRecord.test_case_id)
+        ).all())
+        for item in items:
+            item["executionCount"] = case_counts.get(item["testCaseId"], 1)
     if items:
         eids = [i["id"] for i in items]
         reviews = session.scalars(
@@ -140,7 +192,54 @@ def list_executions(pid: str, page: int = Query(1, ge=1), pageSize: int = Query(
             item["requirementId"] = meta.requirement_id if meta else None
             item["requirementVersion"] = meta.requirement_version if meta else None
             item["requirementName"] = meta.requirement_name if meta else None
-    return ok({"total": total, "page": page, "pageSize": pageSize, "items": items})
+    return ok({
+        "total": total,
+        "page": page,
+        "pageSize": pageSize,
+        "groupedBy": groupBy,
+        "items": items,
+    })
+
+
+@router.get("/api/projects/{pid}/testcases/{cid}/executions")
+def list_case_executions(
+    pid: str,
+    cid: str,
+    limit: int = Query(50, ge=1, le=200),
+    session: Session = Depends(get_session),
+):
+    execution_service.backfill_execution_requirements(session, pid)
+    records = list(session.scalars(
+        select(ExecutionRecord)
+        .where(ExecutionRecord.project_id == pid, ExecutionRecord.test_case_id == cid)
+        .order_by(ExecutionRecord.start_time.desc(), ExecutionRecord.id.desc())
+        .limit(limit)
+    ))
+    items = []
+    for record in records:
+        status_meta = execution_status_meta(record.status)
+        category_meta = error_category_meta(record.error_category)
+        review = session.scalars(
+            select(ExecutionReview).where(ExecutionReview.execution_id == record.id)
+        ).first()
+        items.append({
+            "id": record.id,
+            "status": record.status,
+            "statusLabel": status_meta["label"],
+            "statusDescription": status_meta["description"],
+            "statusTag": status_meta["tag"],
+            "startTime": to_utc_iso(record.start_time),
+            "durationMs": record.duration_ms,
+            "passedSteps": record.passed_steps,
+            "totalSteps": record.total_steps,
+            "batchId": record.batch_id,
+            "errorCategory": record.error_category,
+            "errorCategoryLabel": category_meta["label"],
+            "errorCategoryDescription": category_meta["description"],
+            "errorMessage": record.error_message,
+            "llmReview": review_with_issues(session, review),
+        })
+    return ok(items)
 
 
 @router.get("/api/executions/{eid}")

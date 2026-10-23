@@ -11,7 +11,8 @@
         <el-option v-for="r in requirements" :key="r.id" :label="`${r.version} · ${r.name}`" :value="r.id" />
         <el-option label="未关联版本" value="__none__" />
       </el-select>
-      <el-tag v-if="isLatestVersion" size="small" type="success" effect="plain">最新</el-tag>
+      <el-tag v-if="!historyMode && isLatestVersion" size="small" type="success" effect="plain">最新</el-tag>
+      <el-tag size="small" effect="plain">{{ historyMode ? '按执行记录' : '按用例去重' }}</el-tag>
       <el-select v-model="status" placeholder="全部状态" clearable style="width: 130px" @change="applyFilter">
         <el-option v-for="s in STATUS" :key="s.v" :label="s.l" :value="s.v" />
       </el-select>
@@ -20,6 +21,7 @@
         <el-icon><Refresh /></el-icon>刷新
       </el-button>
       <el-button
+        v-if="!historyMode"
         type="warning"
         plain
         :disabled="!selectedRows.length"
@@ -29,12 +31,12 @@
         AI 审核{{ selectedRows.length ? `(${selectedRows.length})` : '' }}
       </el-button>
       <div class="spacer" />
-      <el-tag v-if="overview" type="info">全局通过率 {{ Math.round((overview.passRate || 0) * 100) }}%</el-tag>
-      <el-button :loading="reporting" @click="downloadReport">下载 HTML 报告</el-button>
+      <el-tag v-if="!historyMode && overview" type="info">全局通过率 {{ Math.round((overview.passRate || 0) * 100) }}%</el-tag>
+      <el-button v-if="!historyMode" :loading="reporting" @click="downloadReport">下载 HTML 报告</el-button>
     </div>
 
     <!-- 覆盖矩阵 -->
-    <el-card v-if="matrix" shadow="never" class="card">
+    <el-card v-if="!historyMode && matrix" shadow="never" class="card">
       <template #header>
         <div class="cov-head">
           <b>覆盖矩阵</b>
@@ -93,12 +95,21 @@
       @expand-change="onExpand"
       @selection-change="(v) => (selectedRows = v)"
     >
-      <el-table-column v-if="!isNarrow" type="selection" width="45" />
+      <el-table-column v-if="!isNarrow && !historyMode" type="selection" width="45" />
       <el-table-column type="expand">
         <template #default="{ row }">
           <div class="expand-detail">
             <div v-if="detailMap[row.id]?.loading" class="loading-tip">加载步骤中…</div>
             <template v-else-if="detailMap[row.id]">
+              <el-alert
+                v-if="row.status === 'needs_review'"
+                title="该执行需要人工复核"
+                :description="reviewHint(row)"
+                type="warning"
+                show-icon
+                :closable="false"
+                class="alert"
+              />
               <el-alert
                 v-if="detailMap[row.id].detail?.errorCategory"
                 :title="`错误分类：${detailMap[row.id].detail.errorCategoryLabel || detailMap[row.id].detail.errorCategory} (${detailMap[row.id].detail.errorCategory}) — ${detailMap[row.id].detail.errorCategoryDescription || '执行失败'}${detailMap[row.id].detail.errorMessage ? '；详情：' + detailMap[row.id].detail.errorMessage : ''}`"
@@ -132,13 +143,20 @@
                   <el-button link type="primary" size="small" @click="rerunReview(row)">重新 AI 审核</el-button>
                 </div>
                 <div v-if="reviewOf(row).reason" class="review-reason">{{ reviewOf(row).reason }}</div>
+                <el-alert
+                  v-if="reviewOf(row).recommendedAction"
+                  :title="reviewOf(row).recommendedAction"
+                  type="info"
+                  :closable="false"
+                  class="review-action-alert"
+                />
 
                 <!-- 问题截图 + 红框定位 -->
                 <div v-if="reviewOf(row).issues?.length" class="issue-list">
                   <div v-for="(it, idx) in reviewOf(row).issues" :key="idx" class="issue-item">
                     <div class="issue-head">
-                      <el-tag size="small" type="danger" effect="plain">
-                        图{{ it.imageIndex || '?' }}<template v-if="it.stepIndex"> · 步骤{{ it.stepIndex }}</template>
+                      <el-tag size="small" :type="it.imageIndex ? 'danger' : 'warning'" effect="plain">
+                        {{ it.label || (it.imageIndex ? `图${it.imageIndex}` : 'AI 复核要点') }}<template v-if="it.stepIndex"> · 步骤{{ it.stepIndex }}</template>
                       </el-tag>
                       <span class="issue-problem">{{ it.problem }}</span>
                     </div>
@@ -175,6 +193,21 @@
                   </el-button>
                   <span class="review-meta">使用当前 LLM 审核关键截图</span>
                 </div>
+                <div v-if="row.status === 'needs_review'" class="review-actions">
+                  <el-button size="small" type="success" :loading="reviewingId === row.id" @click="onManualReview(row, 'pass')">
+                    人工通过
+                  </el-button>
+                  <el-button size="small" type="danger" :loading="reviewingId === row.id" @click="onManualReview(row, 'fail')">
+                    判为失败
+                  </el-button>
+                  <span class="review-hint">缺少 AI 审核记录，请先发起 AI 审核，或直接查看录屏后人工判定</span>
+                </div>
+              </div>
+
+              <!-- 同一用例的历史执行：主列表只展示最新一次，历史从这里跳转到独立页面查看 -->
+              <div v-if="row.executionCount > 1" class="history-tip">
+                <span class="muted">该用例共执行 {{ row.executionCount }} 次，最新记录在此展示</span>
+                <el-button link type="primary" size="small" @click="goHistory(row)">查看全部执行历史</el-button>
               </div>
 
               <div v-if="detailMap[row.id].steps?.length" class="steps">
@@ -214,12 +247,38 @@
           </div>
         </template>
       </el-table-column>
-      <el-table-column prop="testCaseTitle" label="用例标题" :min-width="isNarrow ? 160 : 200">
+      <el-table-column
+        prop="testCaseTitle"
+        :label="historyMode ? '执行记录' : '用例标题'"
+        :min-width="isNarrow ? 160 : 200"
+      >
         <template #default="{ row }">
           <div class="case-cell">
-            <span class="case-title" :title="row.testCaseTitle">{{ row.testCaseTitle }}</span>
-            <span class="case-id">{{ row.id }}</span>
+            <template v-if="historyMode">
+              <span class="case-title" :title="row.id">{{ row.id }}</span>
+            </template>
+            <template v-else>
+              <span class="case-title" :title="row.testCaseTitle">{{ row.testCaseTitle }}</span>
+              <span class="case-id">{{ row.id }}</span>
+            </template>
           </div>
+        </template>
+      </el-table-column>
+      <el-table-column v-if="historyMode" label="步骤" width="90">
+        <template #default="{ row }">
+          <span v-if="row.totalSteps != null" class="muted">{{ row.passedSteps ?? 0 }}/{{ row.totalSteps }}</span>
+          <span v-else class="muted">—</span>
+        </template>
+      </el-table-column>
+      <el-table-column v-if="!historyMode" label="执行次数" width="90">
+        <template #default="{ row }">
+          <el-tag
+            size="small"
+            :type="row.executionCount > 1 ? 'warning' : 'info'"
+            effect="plain"
+          >
+            {{ row.executionCount || 1 }}
+          </el-tag>
         </template>
       </el-table-column>
       <el-table-column v-if="!isNarrow" label="需求版本" width="90">
@@ -233,7 +292,12 @@
       <el-table-column label="状态" width="100">
         <template #default="{ row }">
           <div class="status-cell">
-            <el-tooltip :content="row.statusDescription || statusDescription(row.status)" placement="top">
+            <el-tooltip
+              :content="row.status === 'needs_review'
+                ? reviewTooltip(row)
+                : (row.statusDescription || statusDescription(row.status))"
+              placement="top"
+            >
               <el-tag size="small" :type="row.statusTag || execTag(row.status)">
                 {{ row.statusLabel || statusLabel(row.status) }}
               </el-tag>
@@ -268,9 +332,15 @@
       <el-table-column label="开始时间" width="160">
         <template #default="{ row }">{{ row.startTime ? new Date(row.startTime).toLocaleString() : '—' }}</template>
       </el-table-column>
-      <el-table-column label="操作" width="90" :fixed="isNarrow ? false : 'right'">
+      <el-table-column label="操作" width="130" :fixed="isNarrow ? false : 'right'">
         <template #default="{ row }">
           <el-button link type="primary" @click="toggleDetail(row)">详情</el-button>
+          <el-button
+            v-if="!historyMode && row.executionCount > 1"
+            link
+            type="warning"
+            @click="goHistory(row)"
+          >历史</el-button>
         </template>
       </el-table-column>
     </el-table>
@@ -352,13 +422,20 @@
 
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { getCoverageMatrix, getExecution, getReport, getSteps, listExecutions } from '../api/mindmap'
 import { batchLlmReview, manualReview, rerunLlmReview } from '../api/executions'
 import { listRequirements } from '../api/requirements'
 import { getOverview } from '../api/stats'
 
-const props = defineProps({ projectId: { type: String, required: true } })
+const props = defineProps({
+  projectId: { type: String, required: true },
+  // 历史模式：只展示某个用例的全部执行记录（不再按用例去重）
+  caseId: { type: String, default: '' },
+  historyMode: { type: Boolean, default: false },
+})
+const router = useRouter()
 
 const STATUS = [
   { v: 'passed', l: '通过' },
@@ -443,6 +520,7 @@ const selectedVersionLabel = computed(() => {
 })
 const emptyText = computed(() => {
   if (loading.value) return '加载中...'
+  if (props.historyMode) return '该用例暂无执行记录'
   if (selectedVersionLabel.value) return `${selectedVersionLabel.value} 暂无执行记录`
   return '暂无执行记录，先在「用例列表」执行用例'
 })
@@ -463,18 +541,28 @@ function onRequirementChange() {
 
 async function load() {
   if (!props.projectId) return
+  if (props.historyMode && !props.caseId) return
   loading.value = true
   try {
     const data = await listExecutions(props.projectId, {
       page: page.value,
       pageSize: pageSize.value,
+      groupBy: props.historyMode ? 'execution' : 'case',
+      testCaseId: props.historyMode ? props.caseId : undefined,
       status: status.value || undefined,
       requirementId: requirementId.value || undefined,
     })
-    rows.value = data.items || []
-    total.value = data.total || 0
-    matrix.value = await getCoverageMatrix(props.projectId, requirementId.value || undefined)
-    overview.value = await getOverview()
+    const items = data.items || []
+    if (props.historyMode) {
+      rows.value = items
+      total.value = data.total || 0
+    } else {
+      const isGrouped = data.groupedBy === 'case'
+      rows.value = isGrouped ? items : dedupExecutionItems(items)
+      total.value = isGrouped ? (data.total || 0) : rows.value.length
+      matrix.value = await getCoverageMatrix(props.projectId, requirementId.value || undefined)
+      overview.value = await getOverview()
+    }
   } finally {
     loading.value = false
     scheduleRefresh()
@@ -489,6 +577,27 @@ function applyFilter() {
 function onSizeChange() {
   page.value = 1
   load()
+}
+
+function dedupExecutionItems(items) {
+  const byCase = new Map()
+  const executionIds = new Map()
+  items.forEach((item) => {
+    const key = item.testCaseId || item.id
+    executionIds.set(key, new Set([...(executionIds.get(key) || []), item.id]))
+    const current = byCase.get(key)
+    const currentTime = new Date(item.startTime || 0).getTime()
+    const selectedTime = current ? new Date(current.startTime || 0).getTime() : -1
+    if (!current || currentTime > selectedTime || (currentTime === selectedTime && item.id > current.id)) {
+      byCase.set(key, item)
+    }
+  })
+  return [...byCase.values()]
+    .map((item) => ({
+      ...item,
+      executionCount: item.executionCount || executionIds.get(item.testCaseId || item.id)?.size || 1,
+    }))
+    .sort((a, b) => new Date(b.startTime || 0) - new Date(a.startTime || 0))
 }
 
 // 有「执行中」记录时自动轮询，避免用户手动刷新
@@ -522,9 +631,29 @@ async function onExpand(row, expandedRows) {
   await refreshDetail(row.id)
 }
 
+// 跳转到该用例的独立执行历史页面
+function goHistory(row) {
+  router.push({
+    name: 'CaseHistory',
+    params: { id: props.projectId, caseId: row.testCaseId },
+  })
+}
+
 // 优先取详情接口返回的审核结果（重新审核后是最新值），否则用列表里的
 function reviewOf(row) {
   return detailMap.value[row.id]?.detail?.llmReview || row.llmReview || null
+}
+
+function reviewHint(row) {
+  const review = reviewOf(row)
+  if (!review) {
+    return '缺少 AI 审核记录。请展开步骤和录屏检查关键结果，或点击「开始 AI 审核」生成复核要点。'
+  }
+  const points = review.reviewPoints || (review.issues || []).map((item) => item.problem).filter(Boolean)
+  if (!points.length) {
+    return review.reason || 'AI 证据不足或判断有疑点，请查看截图、步骤和录屏后人工判定。'
+  }
+  return `共 ${points.length} 个复核点：${points.join('；')}`
 }
 
 function reviewTag(verdict) {
@@ -551,12 +680,14 @@ function reviewDisplay(row) {
 }
 
 function reviewTooltip(row) {
-  const review = row.llmReview
+  const review = reviewOf(row)
   if (!review) return '尚未审核，展开详情可手动发起 AI 审核'
   if (review.reviewer === 'manual') {
     return review.reviewerNote || `人工复核（AI 原判：${reviewLabel(review.verdict)}）`
   }
-  return review.reason || reviewLabel(review.verdict)
+  const points = review.reviewPoints || (review.issues || []).map((item) => item.problem).filter(Boolean)
+  const prefix = points.length ? `${points.length} 个复核点：` : ''
+  return `${prefix}${points[0] || review.reason || reviewLabel(review.verdict)}`
 }
 
 // 审核详情报告
@@ -725,7 +856,7 @@ onBeforeUnmount(() => {
   clearTimer()
 })
 watch(
-  () => props.projectId,
+  () => [props.projectId, props.caseId],
   async () => {
     page.value = 1
     status.value = ''
@@ -804,6 +935,16 @@ watch(
 }
 .err {
   color: var(--el-color-danger);
+}
+.history-tip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 8px 12px;
+  border: 1px dashed var(--el-border-color);
+  border-radius: 6px;
+  background: #fafafa;
 }
 .case-cell {
   display: flex;
@@ -895,6 +1036,9 @@ watch(
 .review-reason {
   margin-top: 6px;
   font-size: 13px;
+}
+.review-action-alert {
+  margin-top: 8px;
 }
 .review-actions {
   display: flex;

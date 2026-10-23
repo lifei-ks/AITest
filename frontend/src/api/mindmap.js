@@ -19,3 +19,5 @@ export const getReport = (pid, requirementId) =>
 export const listExecutions = (pid, params) => request.get(`/projects/${pid}/executions`, { params })
 export const getExecution = (eid) => request.get(`/executions/${eid}`)
 export const getSteps = (eid) => request.get(`/executions/${eid}/steps`)
+export const listCaseExecutions = (pid, cid) =>
+  request.get(`/projects/${pid}/testcases/${cid}/executions`)

@@ -99,7 +99,7 @@
 
 <script setup>
 import { defineAsyncComponent, onMounted, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { getProject } from '../api/projects'
 import { useConfigStore } from '../stores/config'
 import AnalysisTab from '../components/AnalysisTab.vue'
@@ -112,9 +112,11 @@ import TestcasesView from './TestcasesView.vue'
 const MindmapTab = defineAsyncComponent(() => import('../components/MindmapTab.vue'))
 
 const route = useRoute()
+const router = useRouter()
 const store = useConfigStore()
 const project = ref(null)
-const tab = ref('overview')
+const TABS = ['overview', 'analysis', 'requirements', 'generate', 'testcases', 'mindmap', 'executions']
+const tab = ref(TABS.includes(route.query.tab) ? route.query.tab : 'overview')
 const loading = ref(false)
 const error = ref('')
 const activeRequirementId = ref(null)
@@ -156,6 +158,8 @@ function onGenerated() {
 }
 
 function onTabChange(name) {
+  // 标签页写入 URL，便于从执行历史等子页面返回时定位到原标签
+  router.replace({ query: { ...route.query, tab: name } })
   // 标签页是懒加载且常驻内存：每次进入时刷新，避免看到旧数据
   if (name === 'generate') generationKey.value += 1
   else if (name === 'testcases') caseRefreshKey.value += 1
@@ -176,6 +180,12 @@ function formatTime(t) {
 
 onMounted(load)
 watch(() => route.params.id, (id) => { if (id) load() })
+watch(
+  () => route.query.tab,
+  (name) => {
+    if (TABS.includes(name) && name !== tab.value) tab.value = name
+  },
+)
 </script>
 
 <style scoped>

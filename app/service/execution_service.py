@@ -9,6 +9,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -97,6 +98,40 @@ def review_to_dict(
     if review is None:
         return None
     verdict_meta = review_verdict_meta(review.verdict)
+    normalized_issues = [_issue_to_dict(issue) for issue in (issues or [])]
+
+    # 兼容历史记录：早期 AI 结论可能只有 suspect/unavailable + reason，
+    # 没有落库 issue。这里补一个明确的“复核要点”，避免用户只看到状态不知道看什么。
+    if (
+        review.reviewer != "manual"
+        and review.verdict in (VERDICT_SUSPECT, VERDICT_UNAVAILABLE)
+        and not normalized_issues
+    ):
+        problem = (review.reason or "").strip() or (
+            "AI 审核证据不足或不可用，请检查关键截图、执行步骤和录屏后人工判定"
+        )
+        normalized_issues = [{
+            "imageIndex": 0,
+            "stepIndex": None,
+            "label": "AI 复核要点",
+            "screenshot": None,
+            "bbox": None,
+            "problem": problem,
+        }]
+
+    if review.reviewer == "manual":
+        recommended_action = review.reviewer_note or "人工复核已完成。"
+    elif review.verdict == VERDICT_SUSPECT:
+        recommended_action = (
+            "逐条检查下方复核要点，打开对应截图和录屏确认；确认正常可选人工通过，确认异常选判为失败。"
+        )
+    elif review.verdict == VERDICT_UNAVAILABLE:
+        recommended_action = (
+            "先重新执行 AI 审核；若仍不可用，展开步骤记录并查看录屏后人工判定。"
+        )
+    else:
+        recommended_action = None
+
     return {
         "verdict": review.verdict,
         "verdictLabel": verdict_meta["label"],
@@ -109,7 +144,10 @@ def review_to_dict(
         "reviewerNote": review.reviewer_note,
         "reviewedAt": to_utc_iso(review.reviewed_at),
         "createdAt": to_utc_iso(review.created_at),
-        "issues": [_issue_to_dict(i) for i in (issues or [])],
+        "issues": normalized_issues,
+        "issueCount": len(normalized_issues),
+        "reviewPoints": [item["problem"] for item in normalized_issues if item.get("problem")],
+        "recommendedAction": recommended_action,
         "imageReviews": [_image_review_to_dict(i) for i in (images or [])],
     }
 
@@ -227,7 +265,14 @@ def _upsert_review(session: Session, execution_id: str, result: dict) -> Executi
     session.query(ExecutionReviewIssue).filter(
         ExecutionReviewIssue.execution_id == execution_id
     ).delete(synchronize_session=False)
-    for it in result.get("issues") or []:
+    review_issues = list(result.get("issues") or [])
+    if not review_issues and result.get("verdict") in (VERDICT_SUSPECT, VERDICT_UNAVAILABLE):
+        review_issues = [{
+            "label": "AI 复核要点",
+            "problem": (result.get("reason") or "").strip()
+            or "AI 审核证据不足或不可用，请检查关键截图、执行步骤和录屏后人工判定",
+        }]
+    for it in review_issues:
         session.add(
             ExecutionReviewIssue(
                 review_id=review.id,
@@ -281,6 +326,42 @@ def _rel_path(abs_path: str | None) -> str | None:
         return str(abs_path).replace("\\", "/")
 
 
+def ensure_target_reachable(target_url: str) -> None:
+    """执行前探测被测地址；探测失败时不创建浏览器、截图、录屏或执行记录。"""
+    url = (target_url or "").strip()
+    if not url:
+        from app.common.errors import BizError
+
+        raise BizError(40029, "被测地址为空，无法执行", http_status=400)
+    try:
+        response = httpx.get(url, timeout=5, follow_redirects=True)
+    except httpx.TimeoutException as exc:
+        from app.common.errors import BizError
+
+        raise BizError(
+            40029,
+            f"被测地址无法访问（连接超时）：{url}。请先启动被测服务",
+            http_status=400,
+        ) from exc
+    except Exception as exc:  # noqa: BLE001 - 网络错误统一转业务提示
+        from app.common.errors import BizError
+
+        raise BizError(
+            40029,
+            f"被测地址无法访问：{url}。请检查服务是否已启动",
+            http_status=400,
+        ) from exc
+
+    if response.status_code >= 400:
+        from app.common.errors import BizError
+
+        raise BizError(
+            40029,
+            f"被测地址返回 HTTP {response.status_code}，未开始执行用例：{url}",
+            http_status=400,
+        )
+
+
 def execute_single(
     pid: str,
     cid: str,
@@ -302,6 +383,9 @@ def execute_single(
         else:
             proj = session.get(Project, pid)
             target = (proj.target_url if proj and proj.target_url else None) or "http://127.0.0.1:8200"
+
+        # 必须在创建 running 记录前探测，避免目标不可用时产生假执行和无效截图。
+        ensure_target_reachable(target)
 
         eid = _exec_id()
         record = ExecutionRecord(
@@ -545,6 +629,21 @@ def execute_batch(pid: str, case_ids: list[str], target_url: str | None = None, 
         from app.common.errors import BizError
 
         raise BizError(40020, "单批上限 100 条")
+    if not case_ids:
+        from app.common.errors import BizError
+
+        raise BizError(40030, "请先选择要执行的用例")
+
+    # 批量执行先统一探测一次，避免目标不可用时逐条抛错并生成空批次。
+    probe_target = target_url
+    if not probe_target:
+        with SessionLocal() as session:
+            project = session.get(Project, pid)
+            probe_target = (
+                project.target_url if project and project.target_url else "http://127.0.0.1:8200"
+            )
+    ensure_target_reachable(probe_target)
+
     batch_id = "B-" + uuid.uuid4().hex[:12]
     _cancel_flags[batch_id] = False
 

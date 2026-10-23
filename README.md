@@ -97,8 +97,8 @@ cd ..
 # 1. 配置环境变量
 cp .env.example .env            # 按需填写 DATABASE_URL / LLM_*
 
-# 2. 启动后端（自动建表）
-.venv/Scripts/python -m uvicorn app.main:app --port 8100
+# 2. 启动后端（自动建表；--reload 让后端代码改动后自动生效）
+.venv/Scripts/python -m uvicorn app.main:app --port 8100 --reload --reload-dir app
 
 # 3. 启动前端（默认代理到 8100）
 cd frontend && npm run dev
@@ -126,7 +126,7 @@ cd frontend && npm run dev
 3. 「需求版本」→ 新建 V1.0，填写/上传本期需求文档 → 解析测试点
 4. 「用例生成」→ 选版本 → 生成用例（自动/LLM/规则）
 5. 「测试用例」→ 执行单条/批量
-6. 「执行结果」→ 查看截图、录屏、AI 审核报告；待复核的人工处理
+6. 「执行结果」→ 查看截图、录屏、AI 审核报告；待复核的人工处理；同一用例多次执行时点「历史」进入独立页面查看全部记录
 7. 「脑图」/「下载 HTML 报告」按需导出
 ```
 
@@ -155,11 +155,14 @@ main.py           便捷入口
 | GET | `/api/projects/{pid}/testcases?requirementId=` | 用例列表（按版本过滤） |
 | POST | `/api/projects/{pid}/testcases/{cid}/execute` | 执行单条用例 |
 | POST | `/api/projects/{pid}/testcases/batch-execute` | 批量执行 |
-| GET | `/api/projects/{pid}/executions?requirementId=` | 执行结果（按版本过滤） |
+| GET | `/api/projects/{pid}/executions?requirementId=` | 执行结果（默认按用例去重并展示最新一次） |
+| GET | `/api/projects/{pid}/testcases/{cid}/executions` | 单个用例的执行历史 |
 | POST | `/api/executions/{eid}/llm-review` | 单条 AI 审核 |
 | POST | `/api/executions/batch-llm-review` | 批量 AI 审核 |
 | POST | `/api/executions/{eid}/review` | 人工复核（pass/fail） |
 | GET | `/api/meta/execution` | 执行状态、AI 结论和错误分类的完整枚举说明 |
+| POST | `/api/projects/{pid}/testcases/ai-review` | 用例生成后的 AI 质检，输出问题与需求/源码依据 |
+| POST | `/api/projects/{pid}/testcases/ai-fix` | 基于质检问题生成修复补丁，校验通过后落版本 |
 | GET | `/api/projects/{pid}/mindmap/preview?requirementId=` | 脑图预览 |
 | GET | `/api/projects/{pid}/coverage/matrix?requirementId=` | 规划/执行覆盖矩阵 |
 | GET | `/api/projects/{pid}/report?requirementId=` | HTML 报告 |

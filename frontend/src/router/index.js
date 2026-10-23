@@ -15,6 +15,12 @@ const routes = [
     meta: { title: '项目列表' },
   },
   {
+    path: '/projects/:id/testcases/:caseId/executions',
+    name: 'CaseHistory',
+    component: () => import('../views/CaseHistoryView.vue'),
+    meta: { title: '执行历史' },
+  },
+  {
     path: '/projects/:id',
     name: 'ProjectDetail',
     component: () => import('../views/ProjectDetailView.vue'),

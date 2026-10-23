@@ -9,6 +9,10 @@ export const batchDelete = (pid, ids) => request.delete(`/projects/${pid}/testca
 export const listVersions = (pid, cid) => request.get(`/projects/${pid}/testcases/${cid}/versions`)
 export const rollbackVersion = (pid, cid, vid) => request.post(`/projects/${pid}/testcases/${cid}/versions/${vid}/rollback`)
 export const copyTo = (pid, ids, targetProjectId) => request.post(`/projects/${pid}/testcases/copy-to`, { ids, targetProjectId })
+export const aiReviewCases = (pid, caseIds) =>
+  request.post(`/projects/${pid}/testcases/ai-review`, { caseIds }, { timeout: 600000 })
+export const aiFixCase = (pid, caseId, issues = []) =>
+  request.post(`/projects/${pid}/testcases/ai-fix`, { caseId, issues }, { timeout: 600000 })
 export const exportCsv = (pid) => request.get(`/projects/${pid}/testcases/export`, { responseType: 'blob' })
 export const importCsv = (pid, file) => {
   const form = new FormData()

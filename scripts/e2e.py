@@ -59,6 +59,12 @@ def main() -> None:
             r = execution_service.execute_single(pid, tc.id, TARGET, "programmatic")
             results.append(r)
             print(f"  [{r['status']:8}] {tc.type:9} {tc.title[:36]}")
+            if r["status"] not in ("passed", "skipped") and r.get("llmReview"):
+                review = r["llmReview"]
+                print(
+                    f"    AI={review.get('verdict')} 原因={review.get('reason')} "
+                    f"问题={[(x.get('severity'), x.get('problem')) for x in review.get('issues', [])]}"
+                )
 
         passed = sum(1 for r in results if r["status"] == "passed")
         rate = passed / len(results) if results else 0

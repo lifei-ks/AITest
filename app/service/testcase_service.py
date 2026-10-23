@@ -142,6 +142,10 @@ def _apply_payload(tc: TestCase, payload: dict) -> None:
     for field in ("preconditions", "steps", "expected_results", "structured_steps", "test_data"):
         if field in payload and payload[field] is not None:
             setattr(tc, field, json.dumps(payload[field], ensure_ascii=False))
+    if "coverage_refs" in payload and payload["coverage_refs"] is not None:
+        setattr(tc, "coverage_refs", json.dumps(payload["coverage_refs"], ensure_ascii=False))
+    if "execution_status" in payload and payload["execution_status"] in CASE_EXECUTION_STATUSES:
+        tc.execution_status = payload["execution_status"]
 
 
 def _rerun_gate(tc: TestCase) -> None:
@@ -176,7 +180,7 @@ def create_testcase(session: Session, pid: str, payload: dict) -> TestCase:
     return tc
 
 
-def update_testcase(session: Session, cid: str, payload: dict) -> TestCase:
+def update_testcase(session: Session, cid: str, payload: dict, change_note: str | None = None) -> TestCase:
     tc = _get_or_404(session, cid)
     if "structured_steps" in payload and not payload["structured_steps"]:
         raise BizError(40012, "structuredSteps 不能为空")
@@ -185,7 +189,12 @@ def update_testcase(session: Session, cid: str, payload: dict) -> TestCase:
     max_v = session.scalar(
         select(func.max(TestCaseVersion.version)).where(TestCaseVersion.test_case_id == cid)
     ) or 0
-    session.add(TestCaseVersion(test_case_id=cid, version=max_v + 1, snapshot=json.dumps(snapshot, ensure_ascii=False)))
+    session.add(TestCaseVersion(
+        test_case_id=cid,
+        version=max_v + 1,
+        snapshot=json.dumps(snapshot, ensure_ascii=False),
+        change_note=change_note,
+    ))
     _apply_payload(tc, payload)
     _rerun_gate(tc)
     session.flush()

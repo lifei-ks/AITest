@@ -1,7 +1,7 @@
 """V4 质量闸测试：三道闸（Linter → 打分 → 去重）独立验证。"""
 from __future__ import annotations
 
-from app.agent.quality_gate import UiLanguageLinter, run_quality_gate
+from app.agent.quality_gate import UiLanguageLinter, is_compound_expected, run_quality_gate
 from app.agent.test_generator_agent import GeneratedCase
 
 
@@ -85,3 +85,115 @@ def test_dedup_similar_cases():
     gate = run_quality_gate([c1, c2])
     assert len(gate.kept) == 1
     assert gate.dropReasons["duplicate"] == 1
+
+
+def test_compound_expected_detection():
+    """一个预期里出现两个「」锚点 / 嵌套引号 / 分号并列结果 → 复合预期。"""
+    assert is_compound_expected(
+        "20字符可创建并提示「订单创建成功」；21字符提示「收货人不能超过20个字符」"
+    )
+    assert is_compound_expected("「20字符可创建并提示「订单创建成功」」")
+    assert is_compound_expected("提交成功；返回订单列表")
+    assert not is_compound_expected("「订单创建成功」")
+    assert not is_compound_expected("收货人不能超过20个字符")
+
+
+def test_drop_compound_expected():
+    """闸0：复合预期无法被单次执行同时满足，直接丢弃并记录原因。"""
+    case = _case(
+        expected=("20字符可创建并提示「订单创建成功」；21字符提示「收货人不能超过20个字符」",)
+    )
+    gate = run_quality_gate([case])
+    assert gate.dropped == 1
+    assert gate.dropReasons["compound_expected"] == 1
+
+
+def test_split_boundary_cases_not_deduped():
+    """同一测试点拆出的合法/越界用例，预期不同不能按标题相似去重。"""
+    c1 = _case(title="收货人长度20与21字符的边界校验（20字符合法）", expected=("订单创建成功",))
+    c2 = _case(title="收货人长度20与21字符的边界校验（21字符超长）", expected=("收货人不能超过20个字符",))
+    c1.test_point_id = c2.test_point_id = "tp-boundary"
+    gate = run_quality_gate([c1, c2])
+    assert len(gate.kept) == 2
+    assert gate.dropReasons["duplicate"] == 0
+
+
+def test_drop_multiple_inputs_for_same_field():
+    """同一字段先填20字符、再填21字符 → 一例两输入，丢弃。"""
+    steps = [
+        {
+            "order": 1,
+            "type": "ui_action",
+            "action": "打开页面",
+            "target": "页面",
+            "uiSelector": {"type": "route", "value": "/orders/create"},
+            "expected": "",
+            "inputValue": "",
+        },
+        {
+            "order": 2,
+            "type": "input",
+            "action": "输入收货人",
+            "target": "收货人",
+            "uiSelector": {"type": "placeholder", "value": "请输入收货人"},
+            "expected": "",
+            "inputValue": "合" * 20,
+        },
+        {
+            "order": 3,
+            "type": "input",
+            "action": "输入收货人",
+            "target": "收货人",
+            "uiSelector": {"type": "placeholder", "value": "请输入收货人"},
+            "expected": "",
+            "inputValue": "超" * 21,
+        },
+        {
+            "order": 4,
+            "type": "state_assert",
+            "action": "验证「收货人不能超过20个字符」",
+            "target": "",
+            "uiSelector": {"type": "text", "value": "「收货人不能超过20个字符」"},
+            "expected": "「收货人不能超过20个字符」",
+            "inputValue": "",
+        },
+    ]
+    case = _case(structured_steps=steps, expected=("收货人不能超过20个字符",))
+    gate = run_quality_gate([case])
+    assert gate.dropped == 1
+    assert gate.dropReasons["multiple_inputs"] == 1
+
+
+def test_multiple_inputs_different_fields_allowed():
+    """不同字段各填一次是正常单场景用例，不能误杀。"""
+    steps = [
+        {
+            "order": 1,
+            "type": "input",
+            "action": "输入手机号",
+            "target": "手机号",
+            "uiSelector": {"type": "placeholder", "value": "请输入手机号"},
+            "expected": "",
+            "inputValue": "13800138000",
+        },
+        {
+            "order": 2,
+            "type": "input",
+            "action": "输入收货地址",
+            "target": "收货地址",
+            "uiSelector": {"type": "placeholder", "value": "请输入收货地址"},
+            "expected": "",
+            "inputValue": "北京市朝阳区测试路1号",
+        },
+        {
+            "order": 3,
+            "type": "state_assert",
+            "action": "验证「订单创建成功」",
+            "target": "",
+            "uiSelector": {"type": "text", "value": "「订单创建成功」"},
+            "expected": "「订单创建成功」",
+            "inputValue": "",
+        },
+    ]
+    gate = run_quality_gate([_case(structured_steps=steps, expected=("订单创建成功",))])
+    assert len(gate.kept) == 1

@@ -8,7 +8,7 @@ import uuid
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.agent.quality_gate import run_quality_gate
+from app.agent.quality_gate import is_compound_expected, run_quality_gate, steps_have_multiple_inputs
 from app.agent.test_generator_agent import generate_rule_cases, generate_rule_cases_for_points
 from app.analyzer.models import (
     BackendResult,
@@ -493,6 +493,13 @@ def _gen_llm_for_points(client, requirement, points, backend, frontend, machines
     """按需求测试点生成用例（LLM，分批）。返回用例的 test_point_id 必须能对上测试点。"""
     from app.agent.test_generator_agent import GeneratedCase
 
+    # 后端校验注解才是必填/长度的可靠来源（Vue rules 常在 <script> 中，前端解析拿不到）
+    required_names = {
+        c.field
+        for e in backend.entities
+        for c in e.fieldConstraints
+        if c.rule in ("notblank", "notnull", "notempty")
+    }
     facts = {
         "pages": [
             {
@@ -503,7 +510,7 @@ def _gen_llm_for_points(client, requirement, points, backend, frontend, machines
                         "label": f.label,
                         "prop": f.prop,
                         "type": f.type,
-                        "required": f.required,
+                        "required": bool(f.required or f.prop in required_names or f.label in required_names),
                         "placeholder": f.placeholder,
                     }
                     for form in p.forms
@@ -512,6 +519,12 @@ def _gen_llm_for_points(client, requirement, points, backend, frontend, machines
             }
             for p in frontend.pages
         ],
+        "fieldConstraints": [
+            {"field": c.field, "rule": c.rule, "value": c.value}
+            for e in backend.entities
+            for c in e.fieldConstraints
+            if c.rule in ("notblank", "notnull", "notempty", "size", "pattern", "max", "min")
+        ][:120],
         "selectors": [{"type": s.type, "value": s.value} for s in frontend.selectors[:80]],
         "uiTexts": frontend.uiTexts[:40],
         "endpoints": [{"method": e.method, "path": e.path} for e in backend.endpoints[:60]],
@@ -544,7 +557,7 @@ def _gen_llm_for_points(client, requirement, points, backend, frontend, machines
             }
             for p in batch
         ]
-        return f"""你是 UI 自动化测试专家。把下面每个测试点转换成一条可直接执行的结构化测试用例，并给出具体参数。
+        return f"""你是 UI 自动化测试专家。把下面每个测试点转换成可直接执行的结构化测试用例，并给出具体参数。
 
 需求版本：{requirement.version} {requirement.name}
 测试点（JSON）：
@@ -553,15 +566,15 @@ def _gen_llm_for_points(client, requirement, points, backend, frontend, machines
 被测系统代码事实（JSON，只能引用其中真实存在的路由/字段/选择器/文案）：
 {json.dumps(facts, ensure_ascii=False)}
 
-输出要求：只输出 JSON 对象，结构 {{"testCases": [...]}}，每个数组元素对应一个测试点：
+输出要求：只输出 JSON 对象，结构 {{"testCases": [...]}}，每个数组元素对应一个测试点的一个输入场景：
 {{
   "testPointId": "原样回填测试点的 testPointId",
   "title": "用例标题",
   "module": "模块名",
   "type": "positive|negative|boundary|state",
   "priority": "P0|P1|P2",
-  "expectedResults": ["可观察的预期结果，用「」锚定页面文案"],
-  "testData": {{"字段prop": "具体输入值"}},
+  "expectedResults": ["一个可观察的预期结果，用「」锚定页面文案"],
+  "testData": {{"字段prop": "具体输入值（包含全部必填字段）"}},
   "structuredSteps": [
     {{"order":1,"type":"ui_action","action":"打开XX页面","target":"XX","uiSelector":{{"type":"route","value":"页面路由"}},"expected":"","inputValue":""}},
     {{"order":2,"type":"input","action":"输入手机号","target":"手机号","uiSelector":{{"type":"placeholder","value":"请输入手机号"}},"expected":"","inputValue":"13800138000"}},
@@ -571,11 +584,13 @@ def _gen_llm_for_points(client, requirement, points, backend, frontend, machines
 }}
 
 硬性要求：
-1. testPointId 必须来自输入测试点，不得编造；每个测试点最多 1 条用例
-2. 只允许引用代码事实中存在的路由、字段 placeholder/label、按钮文案；禁止编造选择器
-3. 第一步必须是打开页面（type=route）；input 步骤必须给具体 inputValue；state_assert 必须用「」锚定页面可见文案
-4. 反例/边界用具体的非法值（如空值、超长串 "超过20个字符的文本"、格式错误值 "123"）
-5. 每条用例不超过 8 步；无法基于事实生成时不要输出该测试点
+1. testPointId 必须来自输入测试点，不得编造；每条用例只验证一个输入场景，expectedResults 只能有 1 条
+2. 只有边界测试点可输出 2 条用例：合法边界值（预期成功）1 条 + 越界值（预期报错）1 条；其余测试点最多 1 条
+3. 页面所有 required=true 的字段（fieldConstraints 中 notblank/notnull/notempty）都必须给出具体 inputValue 并写入 testData；不能只填测试点提到的字段，否则合法路径必然提交失败
+4. 只允许引用代码事实中存在的路由、字段 placeholder/label、按钮文案；禁止编造选择器
+5. 第一步必须是打开页面（type=route）；input 步骤必须给具体 inputValue；state_assert 的 expected 和 uiSelector.value 都只能有 1 个「」锚点，禁止一条断言里塞两个结果或嵌套引号
+6. 反例/边界用具体的非法值（如空值、超长串 "超过20个字符的文本"、格式错误值 "123"）
+7. 每条用例不超过 8 步；无法基于事实生成时不要输出该测试点
 """
 
     cases = []
@@ -603,6 +618,11 @@ def _gen_llm_for_points(client, requirement, points, backend, frontend, machines
             if tp_id not in batch_ids:
                 continue
             point = point_by_id[tp_id]
+            # 测试点本身写了两个场景（如20字符成功+21字符报错）时，LLM 往往只挑一个或继续合并；
+            # 统一交给规则生成器按场景拆分，保证合法/越界两条用例都产出
+            if is_compound_expected(str(point.get("expected") or "")):
+                logger.warning("测试点预期为复合场景，改由规则拆分生成: %s", point["title"])
+                continue
             steps = _normalize_steps(rc.get("structuredSteps"))
             if not steps:
                 continue
@@ -626,6 +646,25 @@ def _gen_llm_for_points(client, requirement, points, backend, frontend, machines
             expected = [str(x) for x in (rc.get("expectedResults") or []) if str(x).strip()]
             if not expected:
                 expected = [point["expected"] or point["title"]]
+            # 复合预期（一条用例判断两个输入/两个结果）无法被单次执行同时满足：
+            # 跳过该 LLM 用例，让该测试点进入规则兜底，由规则拆成单场景用例
+            if any(is_compound_expected(x) for x in expected):
+                logger.warning("LLM 用例包含复合预期，改由规则拆分生成: %s", rc.get("title"))
+                continue
+            compound_assert = any(
+                step.get("type") == "state_assert"
+                and any(
+                    is_compound_expected(str(raw or ""))
+                    for raw in (step.get("expected"), (step.get("uiSelector") or {}).get("value"))
+                )
+                for step in steps
+            )
+            if compound_assert:
+                logger.warning("LLM 用例断言包含多个锚点，改由规则拆分生成: %s", rc.get("title"))
+                continue
+            if steps_have_multiple_inputs(steps):
+                logger.warning("LLM 用例对同一字段给了多个输入值，改由规则拆分生成: %s", rc.get("title"))
+                continue
             refs = rc.get("coverageRefs") if isinstance(rc.get("coverageRefs"), dict) else {}
             cases.append(
                 GeneratedCase(

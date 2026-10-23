@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.common.response import ok
 from app.database import SessionLocal
+from app.service import case_review_service
 from app.service import testcase_service
 
 router = APIRouter(prefix="/api/projects", tags=["testcases"])
@@ -50,6 +51,15 @@ class CopyTo(BaseModel):
 
 class ExecStatus(BaseModel):
     status: str
+
+
+class AiReviewBody(BaseModel):
+    caseIds: list[str]
+
+
+class AiFixBody(BaseModel):
+    caseId: str
+    issues: list[dict] = Field(default_factory=list)
 
 
 @router.get("/{pid}/testcases")
@@ -99,6 +109,16 @@ async def import_csv(pid: str, file: UploadFile = File(...), session: Session = 
 def copy_to(pid: str, payload: CopyTo, session: Session = Depends(get_session)):
     count = testcase_service.copy_to(session, payload.ids, payload.targetProjectId)
     return ok({"copied": count})
+
+
+@router.post("/{pid}/testcases/ai-review")
+def ai_review(pid: str, payload: AiReviewBody, session: Session = Depends(get_session)):
+    return ok(case_review_service.review_cases(session, pid, payload.caseIds))
+
+
+@router.post("/{pid}/testcases/ai-fix")
+def ai_fix(pid: str, payload: AiFixBody, session: Session = Depends(get_session)):
+    return ok(case_review_service.repair_case(session, pid, payload.caseId, payload.issues))
 
 
 @router.delete("/{pid}/testcases/batch")

@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 # 引号锚点：中文角括号「」『』 / 弯引号 / 英文引号
 QUOTE_ANCHOR_RE = re.compile(r"[\u300c\u300e\u201c\u2018\"']([^\u300d\u300f\u201d\u2019\"']+)[\u300d\u300f\u201d\u2019\"']")
+REFRESH_RE = re.compile(r"刷新页面|刷新|reload", re.IGNORECASE)
 
 
 def _selector_for(step: dict) -> str | None:
@@ -104,6 +105,35 @@ def _do_assert(page, expected: str) -> tuple[bool, str, str]:
     return False, "skipped", "无可验证的断言锚点"
 
 
+def _refresh_requested(step: dict) -> bool:
+    selector = step.get("uiSelector") or {}
+    return bool(REFRESH_RE.search(
+        f"{step.get('action') or ''} {step.get('target') or ''} {selector.get('value') or ''}"
+    ))
+
+
+def _reload_and_verify(page) -> dict:
+    """执行真实浏览器刷新，并用 Navigation Timing 生成可审计证据。"""
+    page.reload(wait_until="load")
+    navigation = page.evaluate(
+        """() => {
+          const entries = performance.getEntriesByType('navigation');
+          const nav = entries && entries.length ? entries[entries.length - 1] : null;
+          return { type: nav ? nav.type : '', url: location.href };
+        }"""
+    )
+    navigation_type = str((navigation or {}).get("type") or "")
+    if navigation_type != "reload":
+        raise _StepError(
+            "NAVIGATION_FAILED",
+            f"浏览器刷新未通过 Navigation Timing 验证，实际类型: {navigation_type}",
+        )
+    return {
+        "navigationType": navigation_type,
+        "url": (navigation or {}).get("url"),
+    }
+
+
 def execute_case(case: dict, target_url: str, output_dir: str, mode: str = "programmatic") -> dict:
     """执行单条用例，返回执行记录 dict。"""
     from playwright.sync_api import sync_playwright
@@ -144,6 +174,8 @@ def execute_case(case: dict, target_url: str, output_dir: str, mode: str = "prog
 
                 result = "passed"
                 error = None
+                reload_evidence = None
+                assertion_detail = None
                 try:
                     if stype == "ui_action" and (step.get("uiSelector") or {}).get("type") == "route":
                         route = step["uiSelector"]["value"]
@@ -155,6 +187,8 @@ def execute_case(case: dict, target_url: str, output_dir: str, mode: str = "prog
                                 f"页面返回 HTTP {response.status}: {url}",
                             )
                         page.wait_for_timeout(300)
+                    elif stype == "ui_action" and _refresh_requested(step):
+                        reload_evidence = _reload_and_verify(page)
                     elif stype == "ui_action":
                         loc, attempted = _find_locator(page, step)
                         if not loc:
@@ -169,10 +203,16 @@ def execute_case(case: dict, target_url: str, output_dir: str, mode: str = "prog
                             raise _StepError("SELECTOR_NOT_FOUND", f"输入框未找到，尝试链: {attempted}")
                         loc.fill(step["inputValue"])
                     elif stype == "state_assert":
+                        if REFRESH_RE.search(
+                            f"{step.get('action') or ''} {step.get('expected') or ''}"
+                        ) and reload_evidence is None:
+                            reload_evidence = _reload_and_verify(page)
                         # 等页面跳转/渲染稳定（如提交后 500ms 跳转列表页）
                         page.wait_for_timeout(800)
                         ok_, status, detail = _do_assert(page, step.get("expected") or "")
                         result = status
+                        if status == "passed":
+                            assertion_detail = detail
                         if status == "failed":
                             raise _StepError("ASSERT_FAILED", detail)
                         if status == "skipped":
@@ -200,11 +240,24 @@ def execute_case(case: dict, target_url: str, output_dir: str, mode: str = "prog
                 except Exception:
                     after = None
 
+                action_for_record = str(step.get("action") or "")
+                target_for_record = str(step.get("target") or "")
+                selector_for_record = (step.get("uiSelector") or {}).get("value") or None
+                if reload_evidence:
+                    action_for_record = (
+                        f"{action_for_record}（浏览器已刷新："
+                        f"performance.navigation.type={reload_evidence['navigationType']}）"
+                    )
+                    target_for_record = "browser.reload"
+                    selector_for_record = f"browser.reload; navigationType={reload_evidence['navigationType']}"
+                elif stype == "state_assert" and assertion_detail:
+                    action_for_record = f"{action_for_record}（断言证据：{assertion_detail}）"
+
                 if result == "passed":
                     passed += 1
                 step_results.append({
-                    "stepIndex": idx, "stepType": stype, "action": step.get("action", ""),
-                    "target": step.get("target", ""), "selectorUsed": (step.get("uiSelector") or {}).get("value") or None,
+                    "stepIndex": idx, "stepType": stype, "action": action_for_record,
+                    "target": target_for_record, "selectorUsed": selector_for_record,
                     "result": result, "screenshotBefore": before, "screenshotAfter": after, "error": error,
                 })
                 # 失败即停（不继续无意义步骤）
