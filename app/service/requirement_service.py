@@ -33,6 +33,7 @@ from app.entity.models import (
     TestCaseVersion,
     TestPoint,
 )
+from app.agent import test_point_agent
 from app.llm.client import LlmClient, LlmUnavailable
 from app.service.project_service import parse_prd_text
 
@@ -337,77 +338,20 @@ def _facts_for_prompt(backend, frontend, machines) -> dict:
 
 
 def _normalize_points(raw, source: str) -> list[dict]:
-    if isinstance(raw, dict):
-        raw = raw.get("testPoints") or raw.get("points") or raw.get("data") or []
-    if not isinstance(raw, list):
-        return []
-    out: list[dict] = []
-    seen: set[str] = set()
-    for rc in raw[:40]:
-        if not isinstance(rc, dict):
-            continue
-        title = str(rc.get("title") or "").strip()
-        if not title or title in seen:
-            continue
-        seen.add(title)
-        cat = str(rc.get("category") or "functional").strip().lower()
-        pri = str(rc.get("priority") or "P1").strip().upper()
-        fields = rc.get("fields") or []
-        if not isinstance(fields, list):
-            fields = [str(fields)]
-        out.append(
-            {
-                "title": title[:255],
-                "category": cat if cat in CATEGORIES else "functional",
-                "priority": pri if pri in PRIORITIES else "P1",
-                "description": str(rc.get("description") or "")[:2000],
-                "pageRoute": str(rc.get("pageRoute") or rc.get("page_route") or "")[:255],
-                "endpoint": str(rc.get("endpoint") or "")[:255],
-                "fields": [str(f)[:80] for f in fields][:20],
-                "expected": str(rc.get("expected") or "")[:1000],
-                "source": source,
-                "confidence": float(rc.get("confidence") or (0.85 if source == "llm" else 0.7)),
-            }
-        )
-    return out
+    """保留原内部入口；实现已收敛到 Agent 1，避免两份规则漂移。"""
+    return test_point_agent.normalize_points(raw, source)
 
 
 def _extract_points_llm(client: LlmClient, req: Requirement, backend, frontend, machines) -> list[dict]:
     facts = _facts_for_prompt(backend, frontend, machines)
     content = (req.content or "")[:12000]
-    prompt = f"""你是资深测试分析师。基于「本期需求文档」和「被测系统代码事实」，提取可执行的测试点（不是用例步骤）。
-
-需求版本：{req.version} {req.name}
-需求文档：
-{content}
-
-代码事实（JSON，只能引用其中真实存在的路由/字段/接口/文案）：
-{json.dumps(facts, ensure_ascii=False)}
-
-输出要求：只输出 JSON 对象 {{"testPoints": [...]}}，不要任何解释、markdown 代码块或前后缀。数组元素结构：
-{{
-  "title": "测试点名称，中文，不超过 40 字",
-  "category": "functional|negative|boundary|state|api|permission",
-  "priority": "P0|P1|P2",
-  "description": "验证什么业务规则，包含关键条件",
-  "pageRoute": "代码事实中的页面路由；没有则空字符串",
-  "endpoint": "METHOD /path；没有则空字符串",
-  "fields": ["涉及的字段 prop 或标签"],
-  "expected": "一个可观察的预期结果：只写一个页面可见文案并用「」锚定",
-  "confidence": 0.0~1.0
-}}
-
-硬性要求：
-1. 只依据需求文档与代码事实，禁止编造不存在的页面、路由、字段、文案
-2. 覆盖：核心主流程、必填/格式校验、边界值、状态流转、权限或异常；但一个测试点只描述一个场景、只写一个可观察结果，禁止把「合法值成功」和「越界值报错」合成同一条测试点
-   - 边界校验必须拆成两条：合法边界（如「收货人长度20字符（上边界，合法）」预期成功）与越界（如「收货人长度21字符（超长）」预期报错）
-   - 同一规则不要拆成多条重复测试点
-3. expected 只能出现一个「」锚点；禁止用分号连接两个结果，禁止嵌套「」；只写页面可见文案
-4. 每条测试点必须可被 UI 执行验证；无法验证的纯后端内部逻辑不要输出
-5. 最多 30 条；P0 只给核心主流程；description 控制在 80 字内
-"""
-    raw = client.chat_json([{"role": "user", "content": prompt}], max_tokens=8192, json_mode=True)
-    return _normalize_points(raw, "llm")
+    return test_point_agent.extract_points(
+        client,
+        requirement_version=req.version,
+        requirement_name=req.name,
+        content=content,
+        facts=facts,
+    )
 
 
 # ---------- 测试点抽取：规则兜底 ----------
@@ -645,6 +589,52 @@ def _extract_points_rule(req: Requirement, backend, frontend, machines) -> list[
 
 # ---------- 后台解析任务 ----------
 
+def parse_points(session: Session, req: Requirement, mode: str = "auto") -> list[dict]:
+    """同步抽取测试点（工作流和后台任务共用）。
+
+    保持原解析策略：LLM 优先，LLM 不可用/空结果时规则兜底；mode=rule 时只用规则。
+    """
+    backend, frontend, machines = _load_code_facts(session, req.project_id)
+    points: list[dict] = []
+    if mode in ("llm", "auto"):
+        client = LlmClient(get_settings().llm_api_key, get_settings().llm_base_url, get_settings().llm_model)
+        if client.available():
+            try:
+                points = _extract_points_llm(client, req, backend, frontend, machines)
+            except LlmUnavailable as e:
+                logger.warning("需求测试点 LLM 解析失败，降级规则模式: %s", e)
+    if not points:
+        points = _extract_points_rule(req, backend, frontend, machines)
+    return points
+
+
+def save_points(session: Session, req: Requirement, points: list[dict]) -> None:
+    """整版替换测试点；调用方负责 commit。"""
+    session.query(TestPoint).filter(TestPoint.requirement_id == req.id).delete(synchronize_session=False)
+    for i, p in enumerate(points, start=1):
+        session.add(
+            TestPoint(
+                id=uuid.uuid4().hex,
+                requirement_id=req.id,
+                project_id=req.project_id,
+                seq=i,
+                title=p["title"],
+                category=p["category"],
+                priority=p["priority"],
+                description=p.get("description") or "",
+                page_route=p.get("pageRoute") or None,
+                endpoint=p.get("endpoint") or None,
+                fields=json.dumps(p.get("fields") or [], ensure_ascii=False),
+                expected=p.get("expected") or "",
+                source=p.get("source") or "rule",
+                confidence=p.get("confidence") or 0.7,
+            )
+        )
+    req.status = "ready"
+    req.error_message = None
+    session.flush()
+
+
 def start_analysis(rid: str, mode: str = "auto") -> dict:
     with SessionLocal() as session:
         req = _get_or_404(session, rid)
@@ -663,41 +653,8 @@ def _run_analysis(rid: str, mode: str) -> None:
         req = session.get(Requirement, rid)
         if req is None:
             return
-        backend, frontend, machines = _load_code_facts(session, req.project_id)
-
-        points: list[dict] = []
-        if mode in ("llm", "auto"):
-            client = LlmClient(get_settings().llm_api_key, get_settings().llm_base_url, get_settings().llm_model)
-            if client.available():
-                try:
-                    points = _extract_points_llm(client, req, backend, frontend, machines)
-                except LlmUnavailable as e:
-                    logger.warning("需求测试点 LLM 解析失败，降级规则模式: %s", e)
-        if not points:
-            points = _extract_points_rule(req, backend, frontend, machines)
-
-        session.query(TestPoint).filter(TestPoint.requirement_id == rid).delete(synchronize_session=False)
-        for i, p in enumerate(points, start=1):
-            session.add(
-                TestPoint(
-                    id=uuid.uuid4().hex,
-                    requirement_id=rid,
-                    project_id=req.project_id,
-                    seq=i,
-                    title=p["title"],
-                    category=p["category"],
-                    priority=p["priority"],
-                    description=p.get("description") or "",
-                    page_route=p.get("pageRoute") or None,
-                    endpoint=p.get("endpoint") or None,
-                    fields=json.dumps(p.get("fields") or [], ensure_ascii=False),
-                    expected=p.get("expected") or "",
-                    source=p.get("source") or "rule",
-                    confidence=p.get("confidence") or 0.7,
-                )
-            )
-        req.status = "ready"
-        req.error_message = None
+        points = parse_points(session, req, mode)
+        save_points(session, req, points)
         session.commit()
         logger.info("需求测试点解析完成 requirement=%s points=%s", rid, len(points))
     except Exception as exc:  # noqa: BLE001 - 后台任务需兜底记录

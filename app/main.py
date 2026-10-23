@@ -11,7 +11,17 @@ from app.common.errors import register_exception_handlers
 from app.common.response import ok
 from app.config import get_settings
 from app.database import Base, get_engine
-from app.routers import analysis, executions, generation, mindmap, projects, requirements, settings, testcases
+from app.routers import (
+    analysis,
+    executions,
+    generation,
+    mindmap,
+    projects,
+    requirements,
+    settings,
+    testcases,
+    workflows,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -66,3 +76,4 @@ app.include_router(testcases.router)
 app.include_router(executions.router)
 app.include_router(mindmap.router)
 app.include_router(settings.router)
+app.include_router(workflows.router)

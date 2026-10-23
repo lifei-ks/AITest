@@ -305,7 +305,13 @@ def _validate_case(case: dict, frontend: dict, requirement_text: str, point: Tes
     return errors
 
 
-def repair_case(session: Session, pid: str, cid: str, issues: list[dict] | None = None) -> dict:
+def repair_case(
+    session: Session,
+    pid: str,
+    cid: str,
+    issues: list[dict] | None = None,
+    client: LlmClient | None = None,
+) -> dict:
     tc = _case_or_404(session, pid, cid)
     case = case_to_dict(tc)
     requirement, point = _requirement_point(session, cid)
@@ -324,8 +330,9 @@ def repair_case(session: Session, pid: str, cid: str, issues: list[dict] | None 
                 "evidence": _clean_str(item.get("evidence"), 500),
             })
 
-    settings = get_settings()
-    client = LlmClient(settings.llm_api_key, settings.llm_base_url, settings.llm_model)
+    if client is None:
+        settings = get_settings()
+        client = LlmClient(settings.llm_api_key, settings.llm_base_url, settings.llm_model)
     if not client.available():
         raise BizError(40022, "未配置 LLM_API_KEY，无法进行 AI 修复")
     try:
@@ -357,6 +364,19 @@ def repair_case(session: Session, pid: str, cid: str, issues: list[dict] | None 
     if errors:
         raise BizError(40028, "AI 补丁未通过源码事实校验: " + "；".join(errors[:6]))
 
+    point_dict = None
+    if point is not None:
+        point_dict = {
+            "id": point.id,
+            "title": point.title,
+            "category": point.category,
+            "priority": point.priority,
+            "description": point.description or "",
+            "pageRoute": point.page_route or "",
+            "endpoint": point.endpoint or "",
+            "fields": json.loads(point.fields) if point.fields else [],
+            "expected": point.expected or "",
+        }
     resolved_refs = resolve_coverage_refs(
         {
             "title": merged.get("title"),
@@ -368,7 +388,7 @@ def repair_case(session: Session, pid: str, cid: str, issues: list[dict] | None 
         },
         backend,
         machines,
-        point,
+        point_dict,
     )
     payload = {**patch, "coverage_refs": resolved_refs, "execution_status": "not_run"}
     if tc.source in ("rule", "ai", "import"):

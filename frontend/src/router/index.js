@@ -27,6 +27,12 @@ const routes = [
     meta: { title: '项目详情' },
   },
   {
+    path: '/pipeline',
+    name: 'Pipeline',
+    component: () => import('../views/PipelineView.vue'),
+    meta: { title: 'Pipeline 执行' },
+  },
+  {
     path: '/testcases',
     name: 'Testcases',
     component: () => import('../views/TestcasesView.vue'),

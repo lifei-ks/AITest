@@ -58,6 +58,7 @@ import { useConfigStore } from './stores/config'
 const MENUS = [
   { path: '/dashboard', title: '总览看板', icon: 'Odometer' },
   { path: '/projects', title: '项目列表', icon: 'Folder' },
+  { path: '/pipeline', title: 'Pipeline 执行', icon: 'Promotion' },
   { path: '/testcases', title: '用例列表', icon: 'Document' },
   { path: '/executions', title: '执行结果', icon: 'VideoPlay' },
   { path: '/settings', title: '设置', icon: 'Setting' },

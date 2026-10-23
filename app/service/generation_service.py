@@ -9,6 +9,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.agent.quality_gate import is_compound_expected, run_quality_gate, steps_have_multiple_inputs
+from app.agent import test_case_agent
 from app.agent.test_generator_agent import generate_rule_cases, generate_rule_cases_for_points
 from app.analyzer.models import (
     BackendResult,
@@ -418,7 +419,7 @@ def _gen_llm(client, backend, frontend, machines) -> list:
     from app.agent.test_generator_agent import GeneratedCase
     from app.analyzer.models import to_json_dict
 
-    facts = {
+    prompt_facts = {
         "endpoints": [{"method": e.method, "path": e.path} for e in backend.endpoints],
         "entities": [{"name": e.name, "fields": [f.name for f in e.fields]} for e in backend.entities],
         "enums": [{"name": e.name, "values": [v.name for v in e.values]} for e in backend.enums],
@@ -427,19 +428,7 @@ def _gen_llm(client, backend, frontend, machines) -> list:
         "selectors": [{"type": s.type, "value": s.value} for s in frontend.selectors],
         "stateMachines": machines,
     }
-    prompt = f"""你是测试用例生成专家。基于以下被测系统事实（JSON），生成结构化 UI 测试用例。
-事实：{json.dumps(facts, ensure_ascii=False)}
-
-硬性要求：
-1. 只允许出现事实里真实存在的页面、路由、字段、选择器、文案，禁止编造
-2. 每条用例必须有 title/module/type(positive|negative|boundary|state)/priority/expectedResults(非空数组)/structuredSteps(非空数组)
-3. structuredSteps 每步 type 只允许 ui_action|input|state_assert；第一条 ui_action 必须是打开页面（type=route）
-4. state_assert 的 expected 必须用「」引号锚定页面可见文案
-5. 只生成 6 条最有代表性的用例（正例1/反例2/边界1/流转2），每条步骤精简（不超过 8 步）
-
-输出要求：只输出 JSON 对象 {{"testCases": [...]}}，不要任何思考过程、解释文字、markdown 代码块或前后缀。"""
-    data = client.chat_json([{"role": "user", "content": prompt}], max_tokens=8192, json_mode=True)
-    raw_cases = data if isinstance(data, list) else data.get("testCases", data.get("cases", []))
+    raw_cases = test_case_agent.generate_project_cases(client, prompt_facts)
     cases = []
     for rc in raw_cases:
         try:
@@ -542,73 +531,22 @@ def _gen_llm_for_points(client, requirement, points, backend, frontend, machines
     }
     point_by_id = {p["id"]: p for p in points}
 
-    def build_prompt(batch: list[dict]) -> str:
-        payload = [
-            {
-                "testPointId": p["id"],
-                "title": p["title"],
-                "category": p["category"],
-                "priority": p["priority"],
-                "description": p["description"],
-                "pageRoute": p["pageRoute"],
-                "endpoint": p["endpoint"],
-                "fields": p["fields"],
-                "expected": p["expected"],
-            }
-            for p in batch
-        ]
-        return f"""你是 UI 自动化测试专家。把下面每个测试点转换成可直接执行的结构化测试用例，并给出具体参数。
-
-需求版本：{requirement.version} {requirement.name}
-测试点（JSON）：
-{json.dumps(payload, ensure_ascii=False)}
-
-被测系统代码事实（JSON，只能引用其中真实存在的路由/字段/选择器/文案）：
-{json.dumps(facts, ensure_ascii=False)}
-
-输出要求：只输出 JSON 对象，结构 {{"testCases": [...]}}，每个数组元素对应一个测试点的一个输入场景：
-{{
-  "testPointId": "原样回填测试点的 testPointId",
-  "title": "用例标题",
-  "module": "模块名",
-  "type": "positive|negative|boundary|state",
-  "priority": "P0|P1|P2",
-  "expectedResults": ["一个可观察的预期结果，用「」锚定页面文案"],
-  "testData": {{"字段prop": "具体输入值（包含全部必填字段）"}},
-  "structuredSteps": [
-    {{"order":1,"type":"ui_action","action":"打开XX页面","target":"XX","uiSelector":{{"type":"route","value":"页面路由"}},"expected":"","inputValue":""}},
-    {{"order":2,"type":"input","action":"输入手机号","target":"手机号","uiSelector":{{"type":"placeholder","value":"请输入手机号"}},"expected":"","inputValue":"13800138000"}},
-    {{"order":3,"type":"ui_action","action":"点击提交","target":"提交","uiSelector":{{"type":"text","value":"提交"}},"expected":"","inputValue":""}},
-    {{"order":4,"type":"state_assert","action":"验证提交成功","target":"","uiSelector":{{"type":"text","value":"「提交成功」"}},"expected":"「提交成功」","inputValue":""}}
-  ]
-}}
-
-硬性要求：
-1. testPointId 必须来自输入测试点，不得编造；每条用例只验证一个输入场景，expectedResults 只能有 1 条
-2. 只有边界测试点可输出 2 条用例：合法边界值（预期成功）1 条 + 越界值（预期报错）1 条；其余测试点最多 1 条
-3. 页面所有 required=true 的字段（fieldConstraints 中 notblank/notnull/notempty）都必须给出具体 inputValue 并写入 testData；不能只填测试点提到的字段，否则合法路径必然提交失败
-4. 只允许引用代码事实中存在的路由、字段 placeholder/label、按钮文案；禁止编造选择器
-5. 第一步必须是打开页面（type=route）；input 步骤必须给具体 inputValue；state_assert 的 expected 和 uiSelector.value 都只能有 1 个「」锚点，禁止一条断言里塞两个结果或嵌套引号
-6. 反例/边界用具体的非法值（如空值、超长串 "超过20个字符的文本"、格式错误值 "123"）
-7. 每条用例不超过 8 步；无法基于事实生成时不要输出该测试点
-"""
-
     cases = []
     batch_size = 5
     for start in range(0, len(points), batch_size):
         batch = points[start : start + batch_size]
         batch_ids = {p["id"] for p in batch}
         try:
-            raw = client.chat_json(
-                [{"role": "user", "content": build_prompt(batch)}],
-                max_tokens=8192,
-                json_mode=True,
+            raw = test_case_agent.generate_for_points(
+                client,
+                requirement_version=requirement.version,
+                requirement_name=requirement.name,
+                points=batch,
+                facts=facts,
             )
         except LlmUnavailable as e:
             logger.warning("测试点 %s-%s LLM 生成失败，降级规则: %s", start + 1, start + len(batch), e)
             continue
-        if isinstance(raw, dict):
-            raw = raw.get("testCases") or raw.get("cases") or raw.get("data") or []
         if not isinstance(raw, list):
             continue
         for rc in raw:

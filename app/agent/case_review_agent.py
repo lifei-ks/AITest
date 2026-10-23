@@ -1,9 +1,16 @@
-"""AI generated-case review and repair prompts."""
+"""Agent 3：生成用例的独立审核与修复。
+
+- 提示词外置：``case_review.txt`` / ``case_repair.txt`` / ``case_review_workflow.txt``。
+- 保留原有 ok/suspect/fail 接口（页面上的「AI 质检」继续使用）；
+- 工作流使用 pass/revise/reject 三态接口，并明确区分“可修复”和“不可执行”。
+- 修复仍只产生 patch，必须经过 case_review_service 的源码事实校验后才能落库。
+"""
 from __future__ import annotations
 
 import json
 import re
 
+from app.agent.prompt_loader import render_prompt
 from app.llm.client import LlmUnavailable
 
 CASE_REVIEW_OK = "ok"
@@ -37,40 +44,10 @@ def review_case(client: LlmClient, case: dict, facts: dict) -> dict:
         "case": case,
         "requirementAndSourceFacts": _build_facts(facts),
     }
-    prompt = f"""你是资深 UI 自动化测试评审员。请根据本期需求文档与被测系统源码事实，严格评审下面这条已生成用例。
-
-评审输入：
-{json.dumps(payload, ensure_ascii=False, indent=2)}
-
-必须逐项检查：
-1. 用例是否完整覆盖测试点意图；不得偏离需求或漏掉关键前置条件。
-2. 只能使用事实中的页面路由、字段 placeholder/label、按钮/文案、接口、状态和业务规则；编造定位器是 blocker。
-3. 每个可执行步骤必须有真实 uiSelector；input 必须有 inputValue；禁止 api_call/数据库操作。
-4. state_assert 必须有可观察锚点（「」引号文案或精确 URL）；模糊的“显示正常”是 blocker。
-5. 正例/反例/边界/状态流转的测试数据与预期结果必须匹配需求与源码约束。
-6. 步骤顺序必须符合真实页面跳转和状态前置条件。
-7. 问题必须给出证据，例如页面路由、字段、placeholder、业务规则、状态转换或需求摘录。
-
-verdict 规则：
-- ok：没有 blocker/warning。
-- suspect：存在 warning，或某项无法基于提供事实确认。
-- fail：存在 blocker，或用例无法执行/会错误执行。
-
-只输出 JSON：
-{{
-  "verdict": "ok|suspect|fail",
-  "reason": "不超过 160 字的中文总结",
-  "issues": [
-    {{
-      "severity": "blocker|warning|info",
-      "field": "title|expectedResults|testData|structuredSteps|coverageRefs|preconditions",
-      "problem": "具体问题",
-      "suggestion": "可执行的修复建议",
-      "evidence": "需求/源码事实依据"
-    }}
-  ]
-}}
-"""
+    prompt = render_prompt(
+        "case_review",
+        {"REVIEW_PAYLOAD": json.dumps(payload, ensure_ascii=False, indent=2)},
+    )
     data = client.chat_json([{"role": "user", "content": prompt}], max_tokens=4096, json_mode=True)
     return parse_review(data)
 
@@ -128,38 +105,10 @@ def repair_case(client: LlmClient, case: dict, facts: dict, issues: list[dict] |
         "reviewIssues": issues or [],
         "requirementAndSourceFacts": _build_facts(facts),
     }
-    prompt = f"""你是资深 UI 自动化测试用例修复专家。请根据需求文档、源码事实和 AI 质检问题，修复这条用例。
-
-修复输入：
-{json.dumps(payload, ensure_ascii=False, indent=2)}
-
-硬性要求：
-1. 只输出需要修改的字段 patch；未修改字段不要输出。
-2. structuredSteps 一旦修改，必须输出修复后的完整数组，不能只输出部分步骤。
-3. 第一步必须是 ui_action + route，且 route 必须来自事实中的页面路由。
-4. placeholder/label 必须与事实中的字段完全一致；text 只能使用事实中的按钮/文案。
-5. input 必须有具体 inputValue；state_assert 的 expected 必须使用「真实页面文案」或需求文档中的明确文案锚定。
-6. 禁止 api_call、数据库校验和模糊断言。
-7. 正例/反例/边界/状态类型的测试数据、步骤和预期必须保持一致。
-8. 保留原用例中正确的内容，不要无意义重写。
-
-只输出 JSON：
-{{
-  "summary": "不超过 120 字的修复说明",
-  "patch": {{
-    "title": "如需修改才输出",
-    "module": "如需修改才输出",
-    "type": "positive|negative|boundary|state",
-    "priority": "P0|P1|P2",
-    "preconditions": ["如需修改才输出"],
-    "expectedResults": ["如需修改才输出"],
-    "testData": {{"如需修改才输出": "字段值"}},
-    "structuredSteps": [
-      {{"order":1,"type":"ui_action","action":"打开页面","target":"页面","uiSelector":{{"type":"route","value":"/orders/create"}},"expected":"","inputValue":""}}
-    ]
-  }}
-}}
-"""
+    prompt = render_prompt(
+        "case_repair",
+        {"REPAIR_PAYLOAD": json.dumps(payload, ensure_ascii=False, indent=2)},
+    )
     data = client.chat_json([{"role": "user", "content": prompt}], max_tokens=6144, json_mode=True)
     if not isinstance(data, dict) or not isinstance(data.get("patch"), dict):
         raise LlmUnavailable("AI 修复返回结构非法")
@@ -169,4 +118,120 @@ def repair_case(client: LlmClient, case: dict, facts: dict, issues: list[dict] |
     return {
         "summary": _compact(data.get("summary"), 500) or "AI 修复了用例",
         "patch": patch,
+    }
+
+
+# ---------- 工作流三态审核（pass / revise / reject） ----------
+
+WORKFLOW_STATUSES = ("pass", "revise", "reject")
+_STATUS_ALIASES = {
+    "ok": "pass",
+    "suspect": "revise",
+    "fail": "reject",
+    "passed": "pass",
+    "revised": "revise",
+    "rejected": "reject",
+}
+
+
+def _parse_issues(raw_issues) -> list[dict]:
+    issues: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for item in raw_issues if isinstance(raw_issues, list) else []:
+        if not isinstance(item, dict):
+            continue
+        problem = _compact(item.get("problem"), 1000)
+        if not problem:
+            continue
+        severity = str(item.get("severity") or "warning").lower()
+        if severity not in ("blocker", "warning", "info"):
+            severity = "warning"
+        key = (severity, problem)
+        if key in seen:
+            continue
+        seen.add(key)
+        issues.append(
+            {
+                "severity": severity,
+                "field": _compact(item.get("field"), 60) or "case",
+                "problem": problem,
+                "suggestion": _compact(item.get("suggestion"), 1000),
+                "evidence": _compact(item.get("evidence"), 500),
+            }
+        )
+    return issues[:12]
+
+
+def review_case_workflow(
+    client: LlmClient,
+    case: dict,
+    facts: dict,
+    *,
+    deterministic_issues: list[str] | None = None,
+    deterministic_blocking: list[str] | None = None,
+    quality_score: int = 100,
+) -> dict:
+    """工作流审核：模型给三态意见，最终分值和是否可执行由工作流规则裁定。"""
+    payload = {
+        "case": case,
+        "requirementAndSourceFacts": _build_facts(facts),
+        "deterministicIssues": deterministic_issues or [],
+        "deterministicBlockingIssues": deterministic_blocking or [],
+        "deterministicQualityScore": quality_score,
+    }
+    prompt = render_prompt(
+        "case_review_workflow",
+        {"REVIEW_PAYLOAD": json.dumps(payload, ensure_ascii=False, indent=2)},
+    )
+    data = client.chat_json([{"role": "user", "content": prompt}], max_tokens=4096, json_mode=True)
+    return parse_workflow_review(
+        data,
+        case_id=str(case.get("id") or ""),
+        deterministic_issues=deterministic_issues or [],
+        quality_score=quality_score,
+    )
+
+
+def parse_workflow_review(
+    data,
+    *,
+    case_id: str,
+    deterministic_issues: list[str] | None = None,
+    quality_score: int = 100,
+) -> dict:
+    if not isinstance(data, dict):
+        raise LlmUnavailable("AI 用例审核返回结构非法")
+    raw_status = str(data.get("review_status") or data.get("verdict") or "").strip().lower()
+    status = _STATUS_ALIASES.get(raw_status, raw_status)
+    if status not in WORKFLOW_STATUSES:
+        status = "revise"
+    issues = _parse_issues(data.get("issues"))
+    if status == "pass" and any(item["severity"] in ("blocker", "warning") for item in issues):
+        status = "revise"
+    if status in ("revise", "reject") and not issues:
+        issues.append(
+            {
+                "severity": "warning" if status == "revise" else "blocker",
+                "field": "case",
+                "problem": str(data.get("summary") or data.get("reason") or "AI 认为用例需要调整"),
+                "suggestion": "按审核意见修复后重新审核",
+                "evidence": "",
+            }
+        )
+    missing = data.get("missing_coverage")
+    suggestions = data.get("suggestions")
+    return {
+        "case_id": str(data.get("case_id") or case_id),
+        "review_status": status,
+        "quality_score": max(0, min(100, int(quality_score))),
+        "issues": issues,
+        "missing_coverage": [
+            _compact(item, 300) for item in (missing if isinstance(missing, list) else []) if _compact(item, 300)
+        ][:10],
+        "suggestions": [
+            _compact(item, 500) for item in (suggestions if isinstance(suggestions, list) else []) if _compact(item, 500)
+        ][:10],
+        "deterministic_issues": [str(item)[:1000] for item in (deterministic_issues or [])][:20],
+        "source": "llm",
+        "model": "",
     }

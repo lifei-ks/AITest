@@ -1,6 +1,6 @@
 -- AICase Core MySQL 初始化 DDL（由 scripts/gen_mysql_ddl.py 生成）
 -- 建库后执行：mysql -u root -p <库名> < migrations/mysql/001_init.sql
--- 共 15 张表
+-- 共 20 张表
 
 SET NAMES utf8mb4;
 
@@ -263,3 +263,118 @@ CREATE TABLE test_points (
 CREATE INDEX ix_test_points_project_id ON test_points (project_id);
 CREATE INDEX ix_test_points_requirement ON test_points (requirement_id, seq);
 CREATE INDEX ix_test_points_requirement_id ON test_points (requirement_id);
+
+
+CREATE TABLE workflow_case_reviews (
+	id VARCHAR(36) NOT NULL, 
+	run_id VARCHAR(36) NOT NULL, 
+	case_id VARCHAR(20) NOT NULL, 
+	round INTEGER NOT NULL, 
+	review_status VARCHAR(20) NOT NULL, 
+	quality_score INTEGER NOT NULL, 
+	issues TEXT, 
+	missing_coverage TEXT, 
+	suggestions TEXT, 
+	deterministic_issues TEXT, 
+	source VARCHAR(20) NOT NULL, 
+	model VARCHAR(100), 
+	created_at DATETIME NOT NULL, 
+	PRIMARY KEY (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE INDEX ix_workflow_case_reviews_case_id ON workflow_case_reviews (case_id);
+CREATE INDEX ix_workflow_case_reviews_run_id ON workflow_case_reviews (run_id);
+CREATE INDEX ix_workflow_reviews_run_case ON workflow_case_reviews (run_id, case_id, round);
+
+
+CREATE TABLE workflow_cases (
+	id VARCHAR(36) NOT NULL, 
+	run_id VARCHAR(36) NOT NULL, 
+	case_id VARCHAR(20) NOT NULL, 
+	test_point_id VARCHAR(36), 
+	position INTEGER NOT NULL, 
+	automation_status VARCHAR(20) NOT NULL, 
+	review_status VARCHAR(20) NOT NULL, 
+	revision_count INTEGER NOT NULL, 
+	quality_score INTEGER NOT NULL, 
+	first_review_id VARCHAR(36), 
+	final_review_id VARCHAR(36), 
+	execution_id VARCHAR(20), 
+	analysis_id VARCHAR(36), 
+	created_at DATETIME NOT NULL, 
+	PRIMARY KEY (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE INDEX ix_workflow_cases_analysis_id ON workflow_cases (analysis_id);
+CREATE INDEX ix_workflow_cases_case ON workflow_cases (case_id);
+CREATE INDEX ix_workflow_cases_case_id ON workflow_cases (case_id);
+CREATE INDEX ix_workflow_cases_execution_id ON workflow_cases (execution_id);
+CREATE INDEX ix_workflow_cases_run ON workflow_cases (run_id, position);
+CREATE INDEX ix_workflow_cases_run_id ON workflow_cases (run_id);
+CREATE INDEX ix_workflow_cases_test_point_id ON workflow_cases (test_point_id);
+
+
+CREATE TABLE workflow_result_analyses (
+	id VARCHAR(36) NOT NULL, 
+	run_id VARCHAR(36) NOT NULL, 
+	execution_id VARCHAR(20) NOT NULL, 
+	case_id VARCHAR(20) NOT NULL, 
+	execution_status VARCHAR(20) NOT NULL, 
+	failure_category VARCHAR(30) NOT NULL, 
+	failure_reason TEXT, 
+	evidence TEXT, 
+	confidence FLOAT NOT NULL, 
+	recommended_action TEXT, 
+	needs_human_review INTEGER NOT NULL, 
+	source VARCHAR(20) NOT NULL, 
+	model VARCHAR(100), 
+	raw_response TEXT, 
+	created_at DATETIME NOT NULL, 
+	PRIMARY KEY (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE INDEX ix_workflow_analyses_run ON workflow_result_analyses (run_id);
+CREATE INDEX ix_workflow_result_analyses_case_id ON workflow_result_analyses (case_id);
+CREATE INDEX ix_workflow_result_analyses_execution_id ON workflow_result_analyses (execution_id);
+CREATE INDEX ix_workflow_result_analyses_run_id ON workflow_result_analyses (run_id);
+
+
+CREATE TABLE workflow_runs (
+	id VARCHAR(36) NOT NULL, 
+	project_id VARCHAR(36) NOT NULL, 
+	requirement_id VARCHAR(36), 
+	requirement_version VARCHAR(40), 
+	requirement_name VARCHAR(120), 
+	status VARCHAR(20) NOT NULL, 
+	current_stage VARCHAR(30), 
+	mode VARCHAR(20) NOT NULL, 
+	config TEXT, 
+	summary TEXT, 
+	error_message TEXT, 
+	started_at DATETIME, 
+	finished_at DATETIME, 
+	created_at DATETIME NOT NULL, 
+	PRIMARY KEY (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE INDEX ix_workflow_runs_project ON workflow_runs (project_id, created_at);
+CREATE INDEX ix_workflow_runs_project_id ON workflow_runs (project_id);
+CREATE INDEX ix_workflow_runs_requirement ON workflow_runs (requirement_id);
+CREATE INDEX ix_workflow_runs_requirement_id ON workflow_runs (requirement_id);
+
+
+CREATE TABLE workflow_stages (
+	id VARCHAR(36) NOT NULL, 
+	run_id VARCHAR(36) NOT NULL, 
+	stage VARCHAR(30) NOT NULL, 
+	status VARCHAR(20) NOT NULL, 
+	attempt INTEGER NOT NULL, 
+	input_summary TEXT, 
+	output_summary TEXT, 
+	payload TEXT, 
+	error_message TEXT, 
+	model VARCHAR(100), 
+	started_at DATETIME, 
+	finished_at DATETIME, 
+	duration_ms INTEGER NOT NULL, 
+	created_at DATETIME NOT NULL, 
+	PRIMARY KEY (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE INDEX ix_workflow_stages_run ON workflow_stages (run_id, stage);
+CREATE INDEX ix_workflow_stages_run_id ON workflow_stages (run_id);

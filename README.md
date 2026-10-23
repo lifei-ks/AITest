@@ -51,6 +51,15 @@
 - 覆盖矩阵：规划 vs 执行（接口 / 状态流转 / 业务规则）
 - HTML 报告（含截图）、XMind / Markdown 脑图导出
 
+### 9. 多 Agent 工作流 / Pipeline 一键执行
+- 独立侧边栏「Pipeline 执行」：选项目 + 需求版本，一键完成「代码分析 → 测试点 → 用例 → 审核/修订 → 执行 → 结果分析 → 报告」
+- 缺少代码分析时自动执行静态分析；已有成功分析时默认复用，可强制重新分析
+- 4 个逻辑角色：测试点生成、可执行用例生成、独立用例审核/修订、证据驱动结果分析
+- 审核使用「确定性校验 + LLM 建议」：复合场景/多输入/缺必填字段会被拦截；不通过不执行，超过修订上限转 `reject`，不静默丢弃
+- 结果分析只写自己的分析表，**绝不覆盖真实执行状态**；证据不足一律 `unknown` 并交人工复核
+- 不接入工作流时，原有需求解析/生成/执行接口行为不变
+- 详细设计、API、实验方法与限制见 [docs/MULTI_AGENT_WORKFLOW.md](docs/MULTI_AGENT_WORKFLOW.md)
+
 ## 架构
 
 ```
@@ -71,6 +80,20 @@
 **确定性 / 不确定性分流**：
 - 静态分析、状态机提取、质量闸、覆盖率统计、执行器 = **纯规则**（可复现、可审计）
 - 需求→测试点、事实→用例参数、截图语义判断 = **LLM**（可选，可降级/摘除）
+
+**多 Agent 工作流 / Pipeline**
+
+```
+需求版本 ─► 代码分析(缺则自动) ─► Agent1 测试点 ─► Agent2 用例 ─► Agent3 独立审核/修订(≤2轮)
+                                                                    │
+                                                          仅 pass + automated
+                                                                    ▼
+                                                    现有 Playwright 执行器（截图/录屏/步骤）
+                                                                    ▼
+                                                    Agent4 证据驱动结果分析（不改执行状态）
+                                                                    ▼
+                                                        workflow 报告 + 项目报告附加区块
+```
 
 ## 技术栈
 
@@ -127,18 +150,20 @@ cd frontend && npm run dev
 4. 「用例生成」→ 选版本 → 生成用例（自动/LLM/规则）
 5. 「测试用例」→ 执行单条/批量
 6. 「执行结果」→ 查看截图、录屏、AI 审核报告；待复核的人工处理；同一用例多次执行时点「历史」进入独立页面查看全部记录
-7. 「脑图」/「下载 HTML 报告」按需导出
+7. 侧边栏「Pipeline 执行」→ 选项目与需求版本 → 一键完成代码分析、测试点、用例、审核/修订、执行、结果分析、报告
+8. 「脑图」/「下载 HTML 报告」按需导出
 ```
 
 ## 目录结构
 
 ```
-app/              后端（routers/service/analyzer/agent/llm/entity/common/dto）
+app/              后端（routers/service/analyzer/agent/llm/entity/common/dto/evaluation/workflow）
+app/agent/prompts/ 外置提示词（测试点/用例/审核/修复/结果分析，{{VAR}} 占位符）
 frontend/         Vue 3 前端
-scripts/          demo_site(演示靶站) / sample_src(样本源码) / e2e.py / analyze_cli.py / gen_mysql_ddl.py
+scripts/          demo_site(演示靶站) / sample_src(样本源码) / e2e.py / analyze_cli.py / gen_mysql_ddl.py / evaluate_*.py
 tests/            后端测试
 migrations/mysql/ MySQL DDL（由 scripts/gen_mysql_ddl.py 生成）
-docs/             任务书 / 计划 / 迭代记录
+docs/             任务书 / 计划 / 迭代记录 / 多 Agent 工作流设计
 main.py           便捷入口
 ```
 
@@ -161,6 +186,11 @@ main.py           便捷入口
 | POST | `/api/executions/batch-llm-review` | 批量 AI 审核 |
 | POST | `/api/executions/{eid}/review` | 人工复核（pass/fail） |
 | GET | `/api/meta/execution` | 执行状态、AI 结论和错误分类的完整枚举说明 |
+| POST | `/api/projects/{pid}/workflows` | 启动多 Agent 工作流（异步） |
+| GET | `/api/projects/{pid}/workflows` | 项目工作流运行列表 |
+| GET | `/api/workflows/{run_id}` | 工作流详情（阶段、审核轮次、执行、分析） |
+| GET | `/api/workflows/{run_id}/report` | 工作流 HTML 报告 |
+| GET | `/api/projects/{pid}/report?workflowRunId=` | 项目报告附带指定工作流汇总 |
 | POST | `/api/projects/{pid}/testcases/ai-review` | 用例生成后的 AI 质检，输出问题与需求/源码依据 |
 | POST | `/api/projects/{pid}/testcases/ai-fix` | 基于质检问题生成修复补丁，校验通过后落版本 |
 | GET | `/api/projects/{pid}/mindmap/preview?requirementId=` | 脑图预览 |
@@ -212,13 +242,14 @@ AI 审核结论：
 
 ## 数据模型
 
-启动时由 SQLAlchemy `create_all` 自动建表（也提供 `migrations/mysql/001_init.sql`，共 15 张表），核心表：
+启动时由 SQLAlchemy `create_all` 自动建表（也提供 `migrations/mysql/001_init.sql`，共 20 张表），核心表：
 
 - `projects` / `code_analyses` / `state_machines`
 - `requirements`（需求版本）/ `test_points`（测试点）
 - `test_cases` / `test_case_versions` / `requirement_cases`（版本↔用例映射）
 - `execution_records` / `execution_steps` / `execution_requirements`（执行↔版本快照）
 - `execution_reviews` / `execution_review_images`（逐图分析）/ `execution_review_issues`（问题定位）
+- `workflow_runs` / `workflow_stages` / `workflow_cases` / `workflow_case_reviews` / `workflow_result_analyses`（多 Agent 工作流）
 
 ## 验证
 
@@ -227,6 +258,14 @@ pytest                                   # 后端全量测试（临时库）
 cd frontend && npm run build             # 前端构建
 .venv/Scripts/python scripts/e2e.py      # 端到端自检
 .venv/Scripts/python scripts/analyze_cli.py <源码路径>   # 命令行静态分析
+.venv/Scripts/python -m pytest -q tests/test_workflow.py tests/test_evaluation.py  # 工作流与评测
+```
+
+实验脚本（会改写生成用例，需 `--allow-write`）：
+
+```bash
+.venv/Scripts/python scripts/evaluate_workflow.py --project-id <pid> --requirement-id <rid> --mode rule --allow-write
+.venv/Scripts/python scripts/evaluate_result_analysis.py --samples labels.jsonl --mode rule
 ```
 
 ## 已知边界（诚实声明）
@@ -236,6 +275,9 @@ cd frontend && npm run build             # 前端构建
 - 执行依赖被测站点已在 `target_url` 运行、且本机已安装 Playwright Chromium。
 - 项目分析当前支持 `local_path`，Git 仓库拉取未实现。
 - 单次批量 AI 审核上限 20 条，逐条串行调用，耗时随条数线性增长。
+- 多 Agent 工作流新增的测试默认使用离线 LLM 和假执行器；真实执行复用现有 Playwright 执行器，需要被测站点与 Chromium 已就绪。工作流不会自动重试目标不可达的执行阶段。
+- 评估实验的 `cost` 为 `null`：`LlmClient` 未采集 token usage；只报告真实调用次数与耗时。
+- 工作流按单需求版本串行执行；同一需求顺序做基线与方案对比属于配对观察，不是独立随机样本。
 
 ## 发布到 GitHub
 

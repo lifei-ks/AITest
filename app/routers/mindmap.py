@@ -50,8 +50,18 @@ def matrix(
 
 
 @router.get("/api/projects/{pid}/report")
-def project_report(pid: str, requirementId: str | None = None, session: Session = Depends(get_session)):
-    html = report_service.build_report(session, pid, requirement_id=requirementId)
+def project_report(
+    pid: str,
+    requirementId: str | None = None,
+    workflowRunId: str | None = None,
+    session: Session = Depends(get_session),
+):
+    html = report_service.build_report(
+        session,
+        pid,
+        requirement_id=requirementId,
+        workflow_run_id=workflowRunId,
+    )
     return Response(content=html.encode("utf-8"), media_type="text/html")
 
 

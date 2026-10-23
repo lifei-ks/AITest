@@ -1,7 +1,10 @@
-"""8 张表：字段与类型严格按 TASK_BOOK 第 4 节。
+"""数据表定义（核心 8 张表 + 需求版本/执行审核/多 Agent 工作流扩展）。
 
 约定：JSON 结构一律存 Text（json.dumps / json.loads 在 service 层做），
 理由：SQLite 对 JSON 列支持有限，且历史快照类字段需要原样保存字符串。
+
+多 Agent 工作流只新增 workflow_* 5 张表，不修改既有表；MySQL DDL 由
+scripts/gen_mysql_ddl.py 统一生成。
 """
 from __future__ import annotations
 
@@ -311,4 +314,139 @@ class Mindmap(Base):
     # JSON: {"modules":5,"cases":12,"leaves":82}
     statistics: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+
+
+class WorkflowRun(Base):
+    """多 Agent 测试工作流的一次运行。
+
+    仅新增表，不改已有用例/执行表；用例通过 workflow_cases 关联，避免 MySQL 加列。
+    status: pending/running/completed/partial/failed/cancelled
+    """
+
+    __tablename__ = "workflow_runs"
+    __table_args__ = (
+        Index("ix_workflow_runs_project", "project_id", "created_at"),
+        Index("ix_workflow_runs_requirement", "requirement_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    project_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    requirement_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    # 固化版本信息：需求版本后续改名/删除，历史运行仍可读
+    requirement_version: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    requirement_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    current_stage: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    # rule / llm / auto
+    mode: Mapped[str] = mapped_column(String(20), nullable=False, default="auto")
+    # JSON: 运行参数（maxCases/maxRevisions/autoExecute/reuseCases 等）
+    config: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # JSON: 汇总统计（用例/审核/执行/根因/覆盖/耗时）
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+
+
+class WorkflowStage(Base):
+    """编排器中一个阶段的执行记录；失败也保留，便于定位和恢复。"""
+
+    __tablename__ = "workflow_stages"
+    __table_args__ = (Index("ix_workflow_stages_run", "run_id", "stage"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    run_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    # test_points / case_generation / case_review / execution / result_analysis / report
+    stage: Mapped[str] = mapped_column(String(30), nullable=False)
+    # pending / running / completed / failed / skipped
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    input_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    output_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # JSON: 阶段结构化结果/统计
+    payload: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    model: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    duration_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+
+
+class WorkflowCase(Base):
+    """工作流 ↔ 用例的本次运行级状态（审核结论、修订次数、执行/分析关联）。"""
+
+    __tablename__ = "workflow_cases"
+    __table_args__ = (
+        Index("ix_workflow_cases_run", "run_id", "position"),
+        Index("ix_workflow_cases_case", "case_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    run_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    case_id: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    test_point_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    position: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # automated / manual / blocked
+    automation_status: Mapped[str] = mapped_column(String(20), nullable=False, default="manual")
+    # pending / pass / revise / reject
+    review_status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    revision_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    quality_score: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    first_review_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    final_review_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    execution_id: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
+    analysis_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+
+
+class WorkflowCaseReview(Base):
+    """用例审核轮次记录：首次审核和每次修订后的审核都保留，不覆盖历史。"""
+
+    __tablename__ = "workflow_case_reviews"
+    __table_args__ = (Index("ix_workflow_reviews_run_case", "run_id", "case_id", "round"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    run_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    case_id: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    round: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    review_status: Mapped[str] = mapped_column(String(20), nullable=False)
+    quality_score: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    issues: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # JSON: 本轮未覆盖的测试点 id / 标题
+    missing_coverage: Mapped[str | None] = mapped_column(Text, nullable=True)
+    suggestions: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # JSON: 不依赖模型的确定性校验问题
+    deterministic_issues: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # llm / deterministic / mixed
+    source: Mapped[str] = mapped_column(String(20), nullable=False, default="deterministic")
+    model: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+
+
+class WorkflowResultAnalysis(Base):
+    """Agent 4 的根因分析。独立存放，绝不覆盖 execution_records.status。"""
+
+    __tablename__ = "workflow_result_analyses"
+    __table_args__ = (Index("ix_workflow_analyses_run", "run_id"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    run_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    execution_id: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    case_id: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    # 分析时的客观执行状态快照（不改原记录）
+    execution_status: Mapped[str] = mapped_column(String(20), nullable=False)
+    # product_defect / test_script_issue / test_data_issue / environment_issue / unknown / none
+    failure_category: Mapped[str] = mapped_column(String(30), nullable=False, default="unknown")
+    failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    evidence: Mapped[str | None] = mapped_column(Text, nullable=True)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    recommended_action: Mapped[str | None] = mapped_column(Text, nullable=True)
+    needs_human_review: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    # llm / rule
+    source: Mapped[str] = mapped_column(String(20), nullable=False, default="rule")
+    model: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    raw_response: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
