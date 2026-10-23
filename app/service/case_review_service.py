@@ -108,6 +108,8 @@ def review_cases(session: Session, pid: str, case_ids: list[str]) -> dict:
             results.append(_unavailable_result(case, LlmUnavailable("未配置 LLM_API_KEY"), client.model))
             continue
         try:
+            # 先释放只读事务，避免长 LLM 调用期间 MySQL 连接空闲超时
+            session.commit()
             review = case_review_agent.review_case(client, case, facts)
             results.append({
                 "caseId": cid,
@@ -271,16 +273,19 @@ def _validate_case(case: dict, frontend: dict, requirement_text: str, point: Tes
                 errors.append(f"步骤 {index} 缺少断言 expected")
             anchors.extend(ANCHOR_RE.findall(expected))
 
-        if selector_type == "route" and selector_value and selector_value not in page_routes:
-            errors.append(f"步骤 {index} 路由不存在: {selector_value}")
-        if selector_type == "placeholder" and selector_value not in placeholders:
-            errors.append(f"步骤 {index} placeholder 不在源码事实中: {selector_value}")
-        if selector_type == "label" and selector_value not in labels:
-            errors.append(f"步骤 {index} label 不在源码事实中: {selector_value}")
-        if selector_type == "text" and selector_value and selector_value not in text_corpus:
-            errors.append(f"步骤 {index} 按钮文案不在源码/需求事实中: {selector_value}")
-        if selector_type in ("role", "testid", "css", "xpath") and selector_value not in selector_values:
-            errors.append(f"步骤 {index} 选择器不在源码事实中: {selector_value}")
+        # state_assert 由执行器消费 expected 中的「」锚点，uiSelector 不参与断言定位；
+        # 对它的 selector 做源码事实校验只会产生假问题。
+        if step_type != "state_assert":
+            if selector_type == "route" and selector_value and selector_value not in page_routes:
+                errors.append(f"步骤 {index} 路由不存在: {selector_value}")
+            if selector_type == "placeholder" and selector_value not in placeholders:
+                errors.append(f"步骤 {index} placeholder 不在源码事实中: {selector_value}")
+            if selector_type == "label" and selector_value not in labels:
+                errors.append(f"步骤 {index} label 不在源码事实中: {selector_value}")
+            if selector_type == "text" and selector_value and selector_value not in text_corpus:
+                errors.append(f"步骤 {index} 按钮文案不在源码/需求事实中: {selector_value}")
+            if selector_type in ("role", "testid", "css", "xpath") and selector_value not in selector_values:
+                errors.append(f"步骤 {index} 选择器不在源码事实中: {selector_value}")
 
     step_anchors: list[str] = []
     for index, step in enumerate(steps, 1):
@@ -335,6 +340,8 @@ def repair_case(
         client = LlmClient(settings.llm_api_key, settings.llm_base_url, settings.llm_model)
     if not client.available():
         raise BizError(40022, "未配置 LLM_API_KEY，无法进行 AI 修复")
+    # 修复可能持续数十秒；先释放只读事务连接，避免 MySQL 空闲超时后写回失败
+    session.commit()
     try:
         repair = case_review_agent.repair_case(client, case, facts, clean_issues)
     except LlmUnavailable as exc:

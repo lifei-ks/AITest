@@ -600,9 +600,12 @@ def parse_points(session: Session, req: Requirement, mode: str = "auto") -> list
         client = LlmClient(get_settings().llm_api_key, get_settings().llm_base_url, get_settings().llm_model)
         if client.available():
             try:
+                # LLM 可能耗时数十秒：先结束只读事务，避免 MySQL 空闲断开连接
+                session.commit()
                 points = _extract_points_llm(client, req, backend, frontend, machines)
             except LlmUnavailable as e:
                 logger.warning("需求测试点 LLM 解析失败，降级规则模式: %s", e)
+                session.rollback()
     if not points:
         points = _extract_points_rule(req, backend, frontend, machines)
     return points

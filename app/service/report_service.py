@@ -112,6 +112,8 @@ def _workflow_context(session: Session, run_id: str) -> tuple[dict | None, set[s
             .order_by(WorkflowStage.created_at)
         )
     )
+    stage_order = {name: index for index, name in enumerate(WORKFLOW_STAGE_LABELS)}
+    stages.sort(key=lambda item: stage_order.get(item.stage, 999))
     cases = list(
         session.scalars(
             select(WorkflowCase).where(WorkflowCase.run_id == run.id).order_by(WorkflowCase.position)

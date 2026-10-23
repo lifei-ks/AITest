@@ -56,6 +56,9 @@ def run_analysis(pid: str, analysis_id: str) -> None:
         if project is None or analysis is None:
             return
 
+        # 静态扫描可能耗时较长：先结束只读事务，避免远程 MySQL 关闭空闲连接
+        session.commit()
+
         warnings: list[str] = []
         backend = None
         frontend = None

@@ -34,6 +34,12 @@ logger = logging.getLogger("app.main")
 async def lifespan(_app: FastAPI):
     # 启动即建表（V2 起有模型后生效；幂等）
     Base.metadata.create_all(get_engine())
+    # 后台线程不会跨进程存活：上次进程遗留的 running 运行必须显式标记失败
+    from app.service import workflow_service
+
+    interrupted = workflow_service.recover_interrupted_runs()
+    if interrupted:
+        logger.warning("已将 %s 个被服务重启中断的工作流标记为 failed", interrupted)
     logger.info("启动完成，数据库: %s", get_settings().database_url)
     yield
 

@@ -130,6 +130,28 @@ def test_validate_case_rejects_invented_test_data_field():
     assert any("testData 字段不在源码/需求事实中" in item for item in errors)
 
 
+def test_validate_case_ignores_state_assert_selector_value():
+    """state_assert 由 expected 锚点断言，uiSelector.value 不参与执行，不应误报。"""
+    frontend = {
+        "pages": [{"route": "/orders/create", "forms": [{"fields": []}]}],
+        "selectors": [{"type": "text", "value": "提交订单"}],
+        "uiTexts": ["创建成功"],
+    }
+    case = {
+        "expectedResults": ["「创建成功」"],
+        "structuredSteps": [
+            {"type": "ui_action", "uiSelector": {"type": "route", "value": "/orders/create"}},
+            {"type": "ui_action", "uiSelector": {"type": "text", "value": "提交订单"}},
+            {
+                "type": "state_assert",
+                "uiSelector": {"type": "text", "value": "「创建成功」"},
+                "expected": "「创建成功」",
+            },
+        ],
+    }
+    assert _validate_case(case, frontend, "", None) == []
+
+
 def test_normalize_patch_rejects_invalid_type():
     with pytest.raises(Exception):
         _normalize_patch({"type": "api_call"})

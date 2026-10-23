@@ -8,7 +8,12 @@ import uuid
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.agent.quality_gate import is_compound_expected, run_quality_gate, steps_have_multiple_inputs
+from app.agent.quality_gate import (
+    is_compound_expected,
+    quoted_anchors,
+    run_quality_gate,
+    steps_have_multiple_inputs,
+)
 from app.agent import test_case_agent
 from app.agent.test_generator_agent import generate_rule_cases, generate_rule_cases_for_points
 from app.analyzer.models import (
@@ -314,6 +319,8 @@ def generate(
             client = LlmClient(get_settings().llm_api_key, get_settings().llm_base_url, get_settings().llm_model)
             if mode in ("llm", "auto") and client.available():
                 try:
+                    # 先释放只读事务，避免长 LLM 调用期间 MySQL 连接空闲被关闭
+                    session.commit()
                     llm_cases = _gen_llm_for_points(
                         client, requirement, points, backend, frontend, machines, on_event=on_event
                     )
@@ -332,6 +339,7 @@ def generate(
                 client = LlmClient(get_settings().llm_api_key, get_settings().llm_base_url, get_settings().llm_model)
                 if client.available():
                     try:
+                        session.commit()
                         llm_cases = _gen_llm(client, backend, frontend, machines)
                         if llm_cases:
                             cases = llm_cases + cases
@@ -563,6 +571,20 @@ def _gen_llm_for_points(client, requirement, points, backend, frontend, machines
                 continue
             steps = _normalize_steps(rc.get("structuredSteps"))
             if not steps:
+                continue
+            allowed_selector_types = {"route", "placeholder", "text", "label", "role", "testid"}
+            if any(
+                (step.get("uiSelector") or {}).get("type") not in allowed_selector_types
+                for step in steps
+            ):
+                logger.warning("LLM 用例使用 css/xpath 等不可验证定位，改由规则生成: %s", rc.get("title"))
+                continue
+            if any(
+                step.get("type") == "state_assert"
+                and len(quoted_anchors(str(step.get("expected") or ""))) != 1
+                for step in steps
+            ):
+                logger.warning("LLM 用例断言不是单「」锚点，改由规则生成: %s", rc.get("title"))
                 continue
             # 执行器依赖第一步导航：LLM 漏掉时用测试点页面路由补上
             first_is_route = (steps[0].get("uiSelector") or {}).get("type") == "route"
