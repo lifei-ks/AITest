@@ -26,6 +26,10 @@ logger = logging.getLogger(__name__)
 
 ENV_KEYS = {"llm_api_key": "LLM_API_KEY", "llm_base_url": "LLM_BASE_URL", "llm_model": "LLM_MODEL"}
 KINDS = ("text", "vision")
+# 1x1 PNG：视觉连通性测试必须真的发一张图，避免“文本 ping”“图片不支持”假成功
+TINY_PNG_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2n7sAAAAASUVORK5CYII="
+)
 
 
 def _mask(key: str | None) -> str:
@@ -214,16 +218,19 @@ def _update_env(updates: dict[str, str]) -> None:
 
 def update(payload: dict, session: Session | None = None) -> dict:
     """兼容旧 /api/settings 的 PUT：更新 .env 默认值，并同步默认 DB profile。"""
-    env = get_settings()
     updates: dict[str, str] = {}
     text_values: dict[str, str] = {}
     vision_values: dict[str, str] = {}
+    text_key_masked = False
+    vision_key_masked = False
     if "llmApiKey" in payload:
         key = payload["llmApiKey"] or ""
         if "***" in key:
-            key = env.llm_api_key
-        updates["LLM_API_KEY"] = key
-        text_values["api_key"] = key
+            # 掩码表示保留目标 profile 原 Key；不能从 .env 取旧 Key 覆盖数据库
+            text_key_masked = True
+        else:
+            updates["LLM_API_KEY"] = key
+            text_values["api_key"] = key
     if payload.get("llmBaseUrl") is not None:
         updates["LLM_BASE_URL"] = payload["llmBaseUrl"]
         text_values["base_url"] = payload["llmBaseUrl"]
@@ -233,9 +240,10 @@ def update(payload: dict, session: Session | None = None) -> dict:
     if "llmVisionApiKey" in payload:
         vkey = payload["llmVisionApiKey"] or ""
         if "***" in vkey:
-            vkey = env.llm_vision_api_key
-        updates["LLM_VISION_API_KEY"] = vkey
-        vision_values["api_key"] = vkey
+            vision_key_masked = True
+        else:
+            updates["LLM_VISION_API_KEY"] = vkey
+            vision_values["api_key"] = vkey
     if payload.get("llmVisionBaseUrl") is not None:
         updates["LLM_VISION_BASE_URL"] = payload["llmVisionBaseUrl"]
         vision_values["base_url"] = payload["llmVisionBaseUrl"]
@@ -256,9 +264,13 @@ def update(payload: dict, session: Session | None = None) -> dict:
         if text_default is not None:
             for key, value in text_values.items():
                 setattr(text_default, key, value)
+        elif text_key_masked:
+            logger.info("旧设置接口收到掩码文本 Key，但没有 DB profile，保持 .env 原值")
         if vision_default is not None:
             for key, value in vision_values.items():
                 setattr(vision_default, key, value)
+        elif vision_key_masked:
+            logger.info("旧设置接口收到掩码视觉 Key，但没有 DB profile，保持 .env 原值")
         if owns:
             db_session.commit()
         else:
@@ -453,12 +465,22 @@ def test_llm(profile_id: str | None = None, kind: str = "text") -> dict:
     if not client.available():
         raise BizError(40030, "未配置 LLM API Key，请先填写")
     try:
-        # 用纯文本 ping，不要求 JSON：推理模型会把 token 花在 reasoning_content 上，
-        # 强求 JSON 会把“连接成功但没产出 JSON”误报成配置失败。
-        text = client.chat_text(
-            [{"role": "user", "content": "请只回复：ok"}],
-            max_tokens=256,
-        )
+        # 连通性测试不强制 JSON；视觉 profile 必须真的发送一张图片，
+        # 否则纯文本 ping 会把“模型不支持图片”误判成视觉配置可用。
+        if kind == "vision":
+            content = [
+                {"type": "text", "text": "请只回复：ok"},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/png;base64,{TINY_PNG_B64}"},
+                },
+            ]
+            text = client.chat_text([{"role": "user", "content": content}], max_tokens=256)
+        else:
+            text = client.chat_text(
+                [{"role": "user", "content": "请只回复：ok"}],
+                max_tokens=256,
+            )
         if not (text or "").strip():
             raise LlmUnavailable("模型返回空内容")
         return {"ok": True, "model": model}

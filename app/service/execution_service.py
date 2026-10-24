@@ -362,6 +362,52 @@ def ensure_target_reachable(target_url: str) -> None:
         )
 
 
+def _mark_execution_interrupted(eid: str, pid: str, cid: str, exc: Exception) -> None:
+    """执行记录已创建但后段异常时，用新 Session 补终态，避免永久 running。"""
+    session = SessionLocal()
+    try:
+        record = session.get(ExecutionRecord, eid)
+        if record is None:
+            return
+        record.status = "failed"
+        record.error_category = record.error_category or "ENV_ERROR"
+        record.error_message = f"执行过程中异常中断：{exc}"[:2000]
+        record.end_time = _now()
+        tc = session.get(TestCase, cid)
+        if tc is not None:
+            tc.execution_status = "failed"
+        session.commit()
+    except Exception:  # noqa: BLE001
+        logger.exception("补偿执行失败状态失败 execution=%s", eid)
+        session.rollback()
+    finally:
+        session.close()
+
+
+def _execution_failure_payload(eid: str, req: Requirement | None, exc: Exception) -> dict:
+    status_meta = execution_status_meta("failed")
+    category_meta = error_category_meta("ENV_ERROR")
+    message = f"执行过程中异常中断：{exc}"[:2000]
+    return {
+        "executionId": eid,
+        "status": "failed",
+        "statusLabel": status_meta["label"],
+        "statusDescription": status_meta["description"],
+        "passedSteps": 0,
+        "totalSteps": 0,
+        "errorCategory": "ENV_ERROR",
+        "errorCategoryLabel": category_meta["label"],
+        "errorCategoryDescription": category_meta["description"],
+        "errorMessage": message,
+        "videoPath": None,
+        "durationMs": 0,
+        "llmReview": None,
+        "requirementId": req.id if req else None,
+        "requirementVersion": req.version if req else None,
+        "requirementName": req.name if req else None,
+    }
+
+
 def execute_single(
     pid: str,
     cid: str,
@@ -409,16 +455,26 @@ def execute_single(
         )
         session.commit()
 
-        # 产物目录：outputs/{项目名}/{用例id}/（截图+录屏）
-        proj = session.get(Project, pid)
-        proj_folder = proj.name if proj else f"project_{pid[:8]}"
-        out_dir = str(Path(get_settings().output_dir) / proj_folder)
-        start = time.time()
-        result = execute_case(snapshot, target, out_dir, mode)
-        duration_ms = int((time.time() - start) * 1000)
+        try:
+            # 产物目录：outputs/{项目名}/{用例id}/（截图+录屏）
+            proj = session.get(Project, pid)
+            proj_folder = proj.name if proj else f"project_{pid[:8]}"
+            out_dir = str(Path(get_settings().output_dir) / proj_folder)
+            start = time.time()
+            result = execute_case(snapshot, target, out_dir, mode)
+            duration_ms = int((time.time() - start) * 1000)
+        except Exception as exc:  # noqa: BLE001 - 已有 running 记录，必须补终态
+            logger.exception("执行用例异常中断 execution=%s case=%s", eid, cid)
+            _mark_execution_interrupted(eid, pid, cid, exc)
+            return _execution_failure_payload(eid, req, exc)
 
-        # AI 截图审核（未配置视觉模型时返回 None，不影响原结果）
-        review_result = review_execution(snapshot, result["steps"], target)
+        try:
+            # AI 截图审核（未配置视觉模型时返回 None，不影响原结果）
+            review_result = review_execution(snapshot, result["steps"], target)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("执行后截图审核异常 execution=%s", eid)
+            _mark_execution_interrupted(eid, pid, cid, exc)
+            return _execution_failure_payload(eid, req, exc)
         final_status = result["status"]
         if review_result:
             final_status = _decide_status(
@@ -433,35 +489,41 @@ def execute_single(
                     error_message = s["error"]
                     break
 
-        record = session.get(ExecutionRecord, eid)
-        record.status = final_status
-        record.error_category = result["errorCategory"]
-        record.error_message = error_message
-        record.video_path = _rel_path(result["videoPath"])
-        record.passed_steps = result["passedSteps"]
-        record.total_steps = result["totalSteps"]
-        record.end_time = _now()
-        record.duration_ms = duration_ms
+        try:
+            record = session.get(ExecutionRecord, eid)
+            record.status = final_status
+            record.error_category = result["errorCategory"]
+            record.error_message = error_message
+            record.video_path = _rel_path(result["videoPath"])
+            record.passed_steps = result["passedSteps"]
+            record.total_steps = result["totalSteps"]
+            record.end_time = _now()
+            record.duration_ms = duration_ms
 
-        review_row = None
-        if review_result:
-            review_row = _upsert_review(session, eid, review_result)
+            review_row = None
+            if review_result:
+                review_row = _upsert_review(session, eid, review_result)
 
-        for s in result["steps"]:
-            session.add(ExecutionStep(
-                execution_id=eid, step_index=s["stepIndex"], action=s["action"], target=s["target"],
-                step_type=s["stepType"], selector_used=s["selectorUsed"], result=s["result"],
-                screenshot_before=_rel_path(s["screenshotBefore"]), screenshot_after=_rel_path(s["screenshotAfter"]),
-                error=s["error"], duration_ms=0,
-            ))
+            for s in result["steps"]:
+                session.add(ExecutionStep(
+                    execution_id=eid, step_index=s["stepIndex"], action=s["action"], target=s["target"],
+                    step_type=s["stepType"], selector_used=s["selectorUsed"], result=s["result"],
+                    screenshot_before=_rel_path(s["screenshotBefore"]), screenshot_after=_rel_path(s["screenshotAfter"]),
+                    error=s["error"], duration_ms=0,
+                ))
 
-        # 回写用例执行状态
-        tc.execution_status = (
-            record.status
-            if record.status in ("passed", "failed", "skipped", "needs_review")
-            else tc.execution_status
-        )
-        session.commit()
+            # 回写用例执行状态
+            tc.execution_status = (
+                record.status
+                if record.status in ("passed", "failed", "skipped", "needs_review")
+                else tc.execution_status
+            )
+            session.commit()
+        except Exception as exc:  # noqa: BLE001 - 写回失败也必须结束 running
+            logger.exception("执行结果落库异常 execution=%s", eid)
+            session.rollback()
+            _mark_execution_interrupted(eid, pid, cid, exc)
+            return _execution_failure_payload(eid, req, exc)
 
         status_meta = execution_status_meta(record.status)
         category_meta = error_category_meta(record.error_category)

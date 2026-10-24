@@ -31,3 +31,9 @@ export const generateRequirementStream = (rid, mode = 'auto', profileId = null) 
   if (profileId) query.set('profileId', profileId)
   return new EventSource(`/api/requirements/${rid}/generate/stream?${query.toString()}`)
 }
+
+// 用例生成版本历史（只读快照；每次生成一条，按时间倒序）
+export const listGenerations = (rid, limit = 50) =>
+  request.get(`/requirements/${rid}/generations`, { params: { limit } })
+export const getGeneration = (rid, generationId) =>
+  request.get(`/requirements/${rid}/generations/${generationId}`)

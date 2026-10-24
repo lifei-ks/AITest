@@ -25,6 +25,7 @@ from app.common.errors import BizError
 from app.common.timeutil import to_utc_iso
 from app.database import SessionLocal
 from app.entity.models import (
+    CaseGeneration,
     Project,
     Requirement,
     RequirementCase,
@@ -102,6 +103,33 @@ def ensure_initial_requirement(session: Session, project: Project) -> None:
 
 
 # ---------- 查询 ----------
+
+
+def _invalidate_generated_cases(session: Session, rid: str) -> None:
+    """需求正文变化后，删除由旧内容生成的用例并解除映射。
+
+    manual/import 用例保留，但它们指向旧测试点的映射必须移除，避免 Pipeline 复用
+    与新版需求不匹配的用例。
+    """
+    case_ids = list(
+        session.scalars(select(RequirementCase.test_case_id).where(RequirementCase.requirement_id == rid))
+    )
+    if not case_ids:
+        return
+    generated = list(
+        session.scalars(
+            select(TestCase.id).where(TestCase.id.in_(case_ids), TestCase.source.in_(["rule", "ai"]))
+        )
+    )
+    if generated:
+        session.query(TestCaseVersion).filter(TestCaseVersion.test_case_id.in_(generated)).delete(
+            synchronize_session=False
+        )
+        session.query(TestCase).filter(TestCase.id.in_(generated)).delete(synchronize_session=False)
+    session.query(RequirementCase).filter(RequirementCase.requirement_id == rid).delete(
+        synchronize_session=False
+    )
+    session.flush()
 
 def _counts(session: Session, req_ids: list[str]) -> tuple[dict[str, int], dict[str, int]]:
     if not req_ids:
@@ -202,6 +230,7 @@ def update_requirement(session: Session, rid: str, data: dict) -> dict:
             # 需求内容变更：旧测试点作废，等待重新解析
             req.content = content
             session.query(TestPoint).filter(TestPoint.requirement_id == rid).delete(synchronize_session=False)
+            _invalidate_generated_cases(session, rid)
             req.status = "draft"
             req.error_message = None
     session.flush()
@@ -217,6 +246,7 @@ def upload_requirement_prd(session: Session, rid: str, filename: str, raw: bytes
     req.status = "draft"
     req.error_message = None
     session.query(TestPoint).filter(TestPoint.requirement_id == rid).delete(synchronize_session=False)
+    _invalidate_generated_cases(session, rid)
     session.flush()
     return requirement_to_dict(req)
 
@@ -238,6 +268,7 @@ def delete_requirement(session: Session, rid: str) -> None:
             session.query(TestCase).filter(TestCase.id.in_(generated)).delete(synchronize_session=False)
         session.query(RequirementCase).filter(RequirementCase.requirement_id == rid).delete(synchronize_session=False)
     session.query(TestPoint).filter(TestPoint.requirement_id == rid).delete(synchronize_session=False)
+    session.query(CaseGeneration).filter(CaseGeneration.requirement_id == rid).delete(synchronize_session=False)
     session.delete(req)
     # 删除是破坏性操作：显式提交，避免依赖请求结束后的隐式提交导致前端刷新读到旧数据
     session.commit()
@@ -608,7 +639,7 @@ def parse_points(session: Session, req: Requirement, mode: str = "auto", profile
                 session.rollback()
     if not points:
         points = _extract_points_rule(req, backend, frontend, machines)
-    return points
+    return test_point_agent.filter_static_structure_points(points)
 
 
 def save_points(session: Session, req: Requirement, points: list[dict]) -> None:

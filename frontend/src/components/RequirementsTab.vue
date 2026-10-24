@@ -248,6 +248,7 @@ const pointsEmptyText = computed(() => {
 
 let pollTimer = null
 let loadingDetailId = null
+let detailRequestSeq = 0
 
 function statusText(s) {
   return STATUS_TEXT[s] || s
@@ -273,16 +274,19 @@ function startPoll() {
   stopPoll()
   analyzing.value = true
   pollTimer = setInterval(async () => {
-    if (!selectedId.value) return stopPoll()
+    const rid = selectedId.value
+    if (!rid) return stopPoll()
     try {
-      const d = await getRequirement(selectedId.value)
+      const d = await getRequirement(rid)
+      if (selectedId.value !== rid) return
       const { content, ...meta } = d
       const idx = requirements.value.findIndex((r) => r.id === d.id)
       if (idx >= 0) requirements.value[idx] = { ...requirements.value[idx], ...meta }
       if (d.status === 'ready' || d.status === 'failed') {
         stopPoll()
         analyzing.value = false
-        await loadDetail(d.id)
+        await loadDetail(rid)
+        if (selectedId.value !== rid) return
         if (d.status === 'ready') {
           ElMessage.success(`解析完成：${d.testPointCount} 个测试点`)
         } else {
@@ -314,22 +318,28 @@ async function loadDetail(id) {
     prd.value = ''
     return
   }
+  const seq = ++detailRequestSeq
   detailLoading.value = true
   loadingDetailId = id
   try {
     const d = await getRequirement(id)
+    if (seq !== detailRequestSeq || selectedId.value !== id) return
     prd.value = d.content || ''
     dirty.value = false
-    points.value = await listTestPoints(id)
+    const loadedPoints = await listTestPoints(id)
+    if (seq !== detailRequestSeq || selectedId.value !== id) return
+    points.value = loadedPoints
     const { content, ...meta } = d
     const idx = requirements.value.findIndex((r) => r.id === id)
     if (idx >= 0) requirements.value[idx] = { ...requirements.value[idx], ...meta }
     if (d.status === 'analyzing') startPoll()
   } catch {
-    points.value = []
+    if (seq === detailRequestSeq && selectedId.value === id) points.value = []
   } finally {
-    loadingDetailId = null
-    detailLoading.value = false
+    if (seq === detailRequestSeq) {
+      loadingDetailId = null
+      detailLoading.value = false
+    }
   }
 }
 
@@ -453,6 +463,9 @@ async function analyze() {
   if (!prd.value.trim()) return ElMessage.warning('请先填写或上传需求文档')
   analyzing.value = true
   try {
+    if (dirty.value) {
+      await saveDoc()
+    }
     await analyzeRequirement(
       selectedId.value,
       analyzeMode.value,

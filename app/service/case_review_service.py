@@ -13,7 +13,7 @@ from app.entity.models import Project, Requirement, RequirementCase, TestCase, T
 from app.llm.client import LlmClient, LlmUnavailable
 from app.service import settings_service
 from app.service.coverage_service import resolve_coverage_refs
-from app.service.generation_service import case_to_dict, get_generation_context
+from app.service.generation_service import _as_text_list, case_to_dict, get_generation_context
 
 MAX_REVIEW_CASES = 20
 SELECTOR_TYPES = {"route", "placeholder", "text", "label", "role", "testid", "css", "xpath"}
@@ -187,9 +187,13 @@ def _normalize_patch(patch: dict) -> dict:
             raise BizError(40026, "preconditions 必须是数组")
         out["preconditions"] = [_clean_str(item, 500) for item in patch["preconditions"] if _clean_str(item, 500)]
     if "expectedResults" in patch:
-        if not isinstance(patch.get("expectedResults"), list):
+        raw_expected = patch.get("expectedResults")
+        if isinstance(raw_expected, str):
+            # 兼容模型把数组写成单个字符串；不能逐字符拆开
+            raw_expected = _as_text_list(raw_expected)
+        if not isinstance(raw_expected, list):
             raise BizError(40026, "expectedResults 必须是数组")
-        out["expected_results"] = [_clean_str(item, 500) for item in patch["expectedResults"] if _clean_str(item, 500)]
+        out["expected_results"] = [_clean_str(item, 500) for item in raw_expected if _clean_str(item, 500)]
         if not out["expected_results"]:
             raise BizError(40026, "expectedResults 不能为空")
     if "testData" in patch:
@@ -317,6 +321,23 @@ def _validate_case(case: dict, frontend: dict, requirement_text: str, point: Tes
             continue
         if anchor not in text_corpus:
             errors.append(f"断言锚点不在源码/需求事实中: {anchor}")
+
+    # 运行时变量：必须由此前 capture 步骤定义；否则只能在执行期报错。
+    available_vars: set[str] = set()
+    for index, step in enumerate(steps, 1):
+        step_type = step.get("type")
+        if step_type == "capture":
+            variable = str(step.get("variable") or "").strip()
+            if variable and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", variable):
+                if variable in available_vars:
+                    errors.append(f"步骤 {index} 重复定义变量: {variable}")
+                available_vars.add(variable)
+            continue
+        for field in ("expected", "inputValue"):
+            raw = str(step.get(field) or "")
+            for name in re.findall(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?:[+-]\d+)?\}", raw):
+                if name not in available_vars:
+                    errors.append(f"步骤 {index} 使用了未捕获变量: {name}")
 
     test_data = case.get("testData") or {}
     if isinstance(test_data, dict):

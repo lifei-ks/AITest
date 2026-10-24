@@ -186,3 +186,24 @@ def test_validate_case_accepts_capture_and_dynamic_anchor():
 def test_normalize_patch_rejects_invalid_type():
     with pytest.raises(Exception):
         _normalize_patch({"type": "api_call"})
+
+
+def test_validate_case_rejects_uncaptured_runtime_variable():
+    frontend = {
+        "pages": [{"route": "/orders/list", "forms": [{"fields": []}]}],
+        "selectors": [],
+        "uiTexts": ["订单创建成功"],
+    }
+    case = {
+        "expectedResults": ["「订单创建成功」"],
+        "structuredSteps": [
+            {"type": "ui_action", "uiSelector": {"type": "route", "value": "/orders/list"}},
+            {
+                "type": "state_assert",
+                "expected": "「共 ${missing+1} 条订单」",
+                "uiSelector": {"type": "text", "value": ""},
+            },
+        ],
+    }
+    errors = _validate_case(case, frontend, "", None)
+    assert any("未捕获变量: missing" in item for item in errors)

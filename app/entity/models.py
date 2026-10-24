@@ -474,3 +474,40 @@ class LlmProfile(Base):
     is_default: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)
+
+
+class IdSequence(Base):
+    """跨进程单调递增序列（TC 编号等），避免 max(id)+1 并发冲突。"""
+
+    __tablename__ = "id_sequences"
+
+    name: Mapped[str] = mapped_column(String(50), primary_key=True)
+    value: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)
+
+
+class CaseGeneration(Base):
+    """一次用例生成的版本快照。
+
+    不加列到 test_cases / requirement_cases，避免线上迁移；每次生成成功保存一份
+    轻量快照，旧版本可回看，当前 live 用例仍按原逻辑替换，避免列表重复。
+    """
+
+    __tablename__ = "case_generations"
+    __table_args__ = (
+        Index("ix_case_generations_requirement", "requirement_id", "created_at"),
+        Index("ix_case_generations_project", "project_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    project_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    requirement_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    # auto / rule / llm
+    mode: Mapped[str] = mapped_column(String(20), nullable=False, default="rule")
+    profile_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    case_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # JSON: 统计、fallbackReason 等
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # JSON: 轻量用例快照（标题/类型/优先级/预期/来源/质量分/测试点）
+    snapshot: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)

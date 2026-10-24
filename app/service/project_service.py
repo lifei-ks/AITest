@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.common.errors import BizError
 from app.config import get_settings
 from app.entity.models import (
+    CaseGeneration,
     CodeAnalysis,
     ExecutionRecord,
     ExecutionStep,
@@ -110,6 +111,7 @@ def delete_project(session: Session, pid: str) -> None:
     session.execute(delete(CodeAnalysis).where(CodeAnalysis.project_id == pid))
     session.execute(delete(StateMachine).where(StateMachine.project_id == pid))
     session.execute(delete(Mindmap).where(Mindmap.project_id == pid))
+    session.execute(delete(CaseGeneration).where(CaseGeneration.project_id == pid))
     session.execute(delete(Project).where(Project.id == pid))
     logger.info("删除项目 %s（级联清理完成）", pid)
 

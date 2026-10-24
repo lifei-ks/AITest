@@ -192,3 +192,108 @@ def test_llm_compound_test_point_falls_back_to_rule_split():
         ("订单创建成功",),
         ("收货人不能超过20个字符",),
     }
+
+
+def test_llm_failure_stops_remaining_batches():
+    from app.llm.client import LlmUnavailable
+
+    backend, frontend, machines = _context()
+    points = [
+        {
+            "id": f"p{i}",
+            "title": f"测试点{i}",
+            "category": "functional",
+            "priority": "P1",
+            "description": "",
+            "pageRoute": "/orders/create",
+            "endpoint": "",
+            "fields": [],
+            "expected": "「订单创建成功」",
+        }
+        for i in range(6)
+    ]
+
+    class FailingClient:
+        calls = 0
+        model = "reasoning-model"
+
+        def chat_json(self, *args, **kwargs):
+            self.calls += 1
+            raise LlmUnavailable("只有 reasoning_content，没有最终答案")
+
+    client = FailingClient()
+    requirement = SimpleNamespace(version="V1.0", name="订单")
+    cases = _gen_llm_for_points(client, requirement, points, backend, frontend, machines)
+    assert cases == []
+    assert client.calls == 1, "第一批失败后应停止后续批次，交给规则兜底"
+
+
+def test_expected_result_string_is_not_split_into_characters():
+    """GLM 可能把 expectedResults 返成字符串，不能逐字符拆成数组。"""
+    from app.service.generation_service import _as_text_list
+
+    assert _as_text_list("对一个已支付订单点击发货后提示「发货成功」") == [
+        "对一个已支付订单点击发货后提示「发货成功」"
+    ]
+    # 历史脏数据：一条字符串被拆成了单字符数组，读取时合并
+    assert _as_text_list(["对", "一", "个", "已", "发"]) == ["对一个已发"]
+    # 正常的多条预期不能被合并
+    assert _as_text_list(["第一条预期", "第二条预期"]) == ["第一条预期", "第二条预期"]
+
+
+def test_llm_string_expected_results_keeps_full_sentence():
+    backend, frontend, machines = _context()
+    point = {
+        "id": "p1",
+        "title": "合法数据创建订单",
+        "category": "functional",
+        "priority": "P0",
+        "description": "",
+        "pageRoute": "/orders/create",
+        "endpoint": "",
+        "fields": [],
+        "expected": "「订单创建成功」",
+    }
+
+    class StringExpectedClient:
+        model = "glm"
+
+        def chat_json(self, *args, **kwargs):
+            return {
+                "testCases": [
+                    {
+                        "testPointId": "p1",
+                        "title": "合法数据创建订单成功",
+                        "type": "positive",
+                        "priority": "P0",
+                        "expectedResults": "填写合法数据提交后页面提示「订单创建成功」",
+                        "structuredSteps": [
+                            {
+                                "order": 1,
+                                "type": "ui_action",
+                                "action": "打开新建订单页面",
+                                "target": "新建订单",
+                                "uiSelector": {"type": "route", "value": "/orders/create"},
+                                "expected": "",
+                                "inputValue": "",
+                            },
+                            {
+                                "order": 2,
+                                "type": "state_assert",
+                                "action": "验证创建成功",
+                                "target": "",
+                                "uiSelector": {"type": "text", "value": "「订单创建成功」"},
+                                "expected": "「订单创建成功」",
+                                "inputValue": "",
+                            },
+                        ],
+                    }
+                ]
+            }
+
+    requirement = SimpleNamespace(version="V1.0", name="订单")
+    cases = _gen_llm_for_points(
+        StringExpectedClient(), requirement, [point], backend, frontend, machines
+    )
+    assert len(cases) == 1
+    assert cases[0].expected_results == ["填写合法数据提交后页面提示「订单创建成功」"]

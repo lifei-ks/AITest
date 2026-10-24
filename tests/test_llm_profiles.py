@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import uuid
 
+import pytest
+
 from fastapi.testclient import TestClient
 
-from app.database import SessionLocal
+from app.database import Base, SessionLocal, get_engine
 from app.entity.models import LlmProfile
 from app.service import settings_service
 
@@ -125,3 +127,79 @@ def test_connectivity_test_uses_text_ping(monkeypatch):
     result = settings_service.test_llm()
     assert result == {"ok": True, "model": "glm-5.3-flash"}
     assert calls and calls[0][0] == "text"
+
+
+def test_chat_json_does_not_use_reasoning_content_as_final_answer(monkeypatch):
+    import httpx
+    from app.llm import client as client_module
+    from app.llm.client import LlmClient, LlmUnavailable
+
+    class FakeResponse:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "",
+                            "reasoning_content": "思考过程，不是最终答案",
+                        }
+                    }
+                ]
+            }
+
+    monkeypatch.setattr(client_module.httpx, "post", lambda *a, **k: FakeResponse())
+    client = LlmClient("fake-key", "https://example.invalid/v1", "reasoning-model")
+    with pytest.raises(LlmUnavailable):
+        client.chat_json([{"role": "user", "content": "x"}])
+    # 只有连通性探测允许把 reasoning 作为“有响应”的证据
+    assert client.chat_text([{"role": "user", "content": "ping"}]) == "思考过程，不是最终答案"
+
+
+def test_legacy_masked_update_keeps_db_key(monkeypatch):
+    Base.metadata.create_all(get_engine())
+    monkeypatch.setattr(settings_service, "_update_env", lambda updates: None)
+    with SessionLocal() as session:
+        session.query(LlmProfile).filter(LlmProfile.kind == "text").update({LlmProfile.is_default: 0})
+        profile = settings_service._new_profile(
+            name=_name("masked-keep"),
+            kind="text",
+            api_key="sk-db-should-stay",
+            base_url="https://db.example/v1",
+            model="db-model",
+            is_default=True,
+        )
+        session.add(profile)
+        session.commit()
+        profile_id = profile.id
+
+    settings_service.update(
+        {"llmApiKey": "sk-d***stay", "llmBaseUrl": "https://new.example/v1"}
+    )
+    with SessionLocal() as session:
+        row = session.get(LlmProfile, profile_id)
+        assert row.api_key == "sk-db-should-stay"
+        assert row.base_url == "https://new.example/v1"
+
+
+def test_vision_connectivity_sends_an_image(monkeypatch):
+    calls = []
+
+    class FakeClient:
+        model = "vlm"
+
+        def available(self):
+            return True
+
+        def chat_text(self, messages, max_tokens=256):
+            calls.append(messages)
+            return "ok"
+
+    monkeypatch.setattr(settings_service, "get_vision_client", lambda: FakeClient())
+    result = settings_service.test_llm(kind="vision")
+    assert result["ok"] is True
+    content = calls[0][0]["content"]
+    assert isinstance(content, list)
+    assert any(part.get("type") == "image_url" for part in content)

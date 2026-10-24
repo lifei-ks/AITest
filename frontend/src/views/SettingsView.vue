@@ -16,6 +16,7 @@
               <div>
                 <span class="card-title">文本 LLM</span>
                 <div class="muted">测试点、用例生成、用例审核、结果分析</div>
+                <div class="muted">推理模型已自动适配：GLM-5.3/5.2 自动降 reasoning_effort，content 为空时兼容 reasoning_content 中的 JSON；仍建议优先选择结构化输出稳定的模型</div>
               </div>
               <el-button type="primary" size="small" @click="openCreate('text')">新增文本配置</el-button>
             </div>

@@ -166,8 +166,9 @@ WorkflowRun.summary → workflow 报告 + 项目报告附加区块
 | `workflow_case_reviews` | 每一轮审核 | round、review_status、quality_score、issues、missing_coverage、suggestions、deterministic_issues、source、model |
 | `workflow_result_analyses` | Agent 4 结果 | execution_id、execution_status 快照、failure_category、reason、evidence、confidence、recommended_action、needs_human_review、source、model、raw_response |
 | `llm_profiles` | 多套 LLM 配置 | kind(text/vision)、name、api_key、base_url、model、enabled、is_default |
+| `case_generations` | 用例生成版本快照 | requirement_id、mode、profile_id、case_count、summary、snapshot |
 
-所有 JSON 字段仍用 `Text` 存字符串；不修改已有表。MySQL DDL 已重新生成：`migrations/mysql/001_init.sql`（21 张表，新增 `llm_profiles`）。
+所有 JSON 字段仍用 `Text` 存字符串；不修改已有表。MySQL DDL 已重新生成：`migrations/mysql/001_init.sql`（23 张表，新增 `llm_profiles`、`id_sequences`、`case_generations`）。
 
 ## 6. API
 
@@ -275,7 +276,7 @@ WorkflowRun.summary → workflow 报告 + 项目报告附加区块
   - 关键场景遗漏率：`negative/boundary/state` 测试点中无任何用例覆盖的比例，并列出遗漏项。
   - 质量分：统一使用现有质量闸分（baseline/proposed 同一把尺）；工作流审核分单独输出为 `reviewQualityScore`，不参与对比。
   - 人工质量分：仅当传入 `--human-scores {caseId: 0~100}` 时计算，否则 `null`。
-  - 调用次数/耗时：真实 `chat_json` 调用次数与墙钟时间；`estimatedCost` 固定 `null`（未采集 token usage）。
+  - 调用次数/耗时：真实 `chat_json` 调用次数与墙钟时间；`estimatedCost` 固定 `null`（未把响应 usage 纳入成本估算）。
 - 输出：`baseline / proposed / diff`，每个数值含绝对值与百分比；基线为 0 时百分比为 `null`。
 - 诚实声明：同一需求顺序执行属于配对观察，不是独立随机样本；严谨实验应对照两份数据库副本或两份需求版本。
 
@@ -297,7 +298,7 @@ WorkflowRun.summary → workflow 报告 + 项目报告附加区块
 
 ```bash
 pytest -q
-# 111 passed, 1 warning（StarletteDeprecationWarning）
+# 138 passed, 1 warning（StarletteDeprecationWarning）
 
 cd frontend && npm run build
 # ✓ built（仅有既有 chunk >500kB 提示）
@@ -306,7 +307,8 @@ cd frontend && npm run build
 工作流测试（`tests/test_workflow.py`）覆盖：
 
 - 所有外置提示词可渲染、无残留占位符
-- 测试点 Agent 丢弃非法条目、字段回填
+- 测试点 Agent 丢弃非法条目、字段回填，并过滤“展示 N 个字段/默认 N 条数据”等静态结构测试点
+- 用例生成 SSE：逐批进度、候选/落库用例逐条展示、LLM→规则兜底事件和来源标记；每次生成保存版本快照，生成页与测试用例页的版本下拉都按时间倒序排列，并始终提供「实时用例（未归档）」选项；改造前旧用例首次查看时自动归档为「历史归档」，不会与后续生成混在一起；测试用例页的历史版本只读，执行/编辑/删除/AI 质检需切回实时用例
 - 结果分析：无证据不冒充缺陷、模型无证据结论降级、locator 失败归为脚本问题
 - 离线 LLM 的完整闭环：阶段全部完成，审核通过用例被执行，分析不覆盖 `ExecutionRecord.status`
 - 无代码分析的项目：Pipeline 自动执行 `code_analysis`，再继续测试点/用例
@@ -348,17 +350,19 @@ cd frontend && npm run build
 - 修订质量取决于 LLM；LLM 不可用时只能做确定性审核，`fixable` 问题会转 `reject` 而非执行。
 - 结果分析仍是启发式 + 可选 LLM；`product_defect` 永远要求人工复核，不替代缺陷管理流程。
 - 长 LLM 调用、Playwright 执行和静态扫描前会主动结束只读事务并释放数据库连接，避免远程 MySQL/网络设备关闭空闲连接后写回报 2013；阶段异常会用新连接落库，不再出现 PendingRollback 掩盖原始错误。
-- LLM 默认超时为 180 秒；超时后审核会降级为确定性规则、结果分析会降级为规则分析，不会因为模型超时直接伪造结果。
+- LLM 默认超时为 240 秒；超时后审核会降级为确定性规则、结果分析会降级为规则分析，不会因为模型超时直接伪造结果。
+- 推理模型（如 GLM-5.3-flash）默认推理强度会把输出预算全花在 reasoning_content 上；客户端对 GLM-5.3/5.2 自动降 `reasoning_effort=low`，并兼容 content 分片、reasoning_content 中的合法 JSON、`finish_reason=length` 时的预算提升重试。只有仍拿不到最终答案才停止后续 LLM 批次并规则兜底。
+- LLM 返回的 `expectedResults` 若是单个字符串会整体保留，不会逐字符拆分；历史逐字符脏数据在读取时自动归一化，已有用例可用 `scripts/fix_expected_results.py` 修复。
 - 如果远程数据库/网络本身中断，阶段仍可能失败；失败状态会保留，重新发起运行即可，不会留下假成功。
-- 启动恢复逻辑假设单进程部署：服务重启时会把遗留 running 运行标记为 failed，避免展示假运行状态。
+- 启动恢复只回收长时间无活动的 running 运行（默认 2 小时），避免多 worker 启动时误杀仍在执行的 Pipeline；崩溃运行可能保持 running 到超过该阈值。
 - 实验 A 顺序执行存在顺序/数据耦合；实验 B 指标依赖标注质量与样本量。仓库不预置任何“提升百分比”。
-- `estimatedCost` 为 `null`，因为当前客户端不采集 token usage；不要把它解读为 0 成本。
+- `estimatedCost` 为 `null`，因为当前客户端未把响应 usage 纳入成本估算；不要把它解读为 0 成本。
 
 ## 12. 文件清单
 
 后端：
 
-- `app/entity/models.py`：新增 5 张工作流表
+- `app/entity/models.py`：新增工作流表、LLM profile、序号表、生成版本快照表
 - `app/workflow/schemas.py`：`WorkflowCreate/TestPointDraft/ReviewIssue/CaseReviewResult/ResultAnalysisResult/FailureAnalysisLLM`
 - `app/agent/prompt_loader.py`：`{{VAR}}` 模板加载/热更新/缺变量报错
 - `app/agent/prompts/*.txt`：7 个外置提示词

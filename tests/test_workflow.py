@@ -79,11 +79,13 @@ def _create_requirement(pid: str, name: str = "订单主流程") -> str:
         return req.id
 
 
-def _fake_execution(monkeypatch, *, status: str = "failed", error_category: str = "ASSERT_FAILED"):
+def _fake_execution(monkeypatch, *, status: str = "failed", error_category: str = "ASSERT_FAILED", fail_on_call: int | None = None):
     calls: list[str] = []
 
     def fake_execute(pid, cid, target_url=None, mode="programmatic", batch_id=None):
         calls.append(cid)
+        if fail_on_call is not None and len(calls) == fail_on_call:
+            raise RuntimeError("模拟执行启动失败")
         with SessionLocal() as session:
             tc = session.get(TestCase, cid)
             eid = "EX-" + uuid.uuid4().hex[:8]
@@ -282,9 +284,9 @@ def test_llm_json_retry_is_bounded(monkeypatch):
 
     def always_bad(messages, max_tokens, json_mode):
         calls.append(1)
-        return "not a json object"
+        return "not a json object", "content"
 
-    monkeypatch.setattr(client, "_chat", always_bad)
+    monkeypatch.setattr(client, "_chat_raw", always_bad)
     with pytest.raises(LlmUnavailable):
         client.chat_json([{"role": "user", "content": "x"}], json_mode=True)
     assert len(calls) == 2, "JSON 解析失败只允许普通模式再试一次，不能无限重试"
@@ -702,7 +704,7 @@ def test_recover_interrupted_runs_marks_failed():
         session.commit()
         run_id = workflow_run.id
 
-    assert workflow_service.recover_interrupted_runs() >= 1
+    assert workflow_service.recover_interrupted_runs(stale_seconds=0) >= 1
     with SessionLocal() as session:
         recovered = session.get(WorkflowRun, run_id)
         stages = {
@@ -804,3 +806,140 @@ def test_generate_uses_selected_text_profile(analyzed_project, monkeypatch):
     assert calls == ["profile-cases"]
     assert result["kept"] > 0
     assert result["mode"] == "rule"
+
+
+def test_partial_execution_start_failure_marks_run_partial(analyzed_project, monkeypatch):
+    rid = _create_requirement(analyzed_project, "部分执行失败")
+    with SessionLocal() as session:
+        req = session.get(Requirement, rid)
+        points = requirement_service.parse_points(session, req, "rule")
+        requirement_service.save_points(session, req, points)
+        session.commit()
+    generation_service.generate(analyzed_project, "rule", requirement_id=rid)
+    monkeypatch.setattr(workflow_service, "_text_client", _offline_client)
+    _fake_execution(monkeypatch, status="passed", error_category=None, fail_on_call=2)
+
+    with SessionLocal() as session:
+        run = workflow_service.create_run(
+            session,
+            analyzed_project,
+            WorkflowCreate(
+                requirementId=rid,
+                mode="rule",
+                autoExecute=True,
+                analyzeEnabled=False,
+                reuseExistingCases=True,
+                maxCases=5,
+            ),
+            run_async=False,
+        )
+    with SessionLocal() as session:
+        detail = workflow_service.get_run_detail(session, run["id"])
+    stages = {stage["stage"]: stage for stage in detail["stages"]}
+    assert run["status"] == "partial"
+    assert stages["execution"]["status"] == "completed"
+    assert stages["execution"]["payload"]["partial"] is True
+    assert stages["execution"]["payload"]["failedToStart"] == 1
+
+
+def test_rule_generation_does_not_validate_llm_profile(analyzed_project, monkeypatch):
+    rid = _create_requirement(analyzed_project, "规则模式不依赖 LLM")
+    with SessionLocal() as session:
+        req = session.get(Requirement, rid)
+        points = requirement_service.parse_points(session, req, "rule")
+        requirement_service.save_points(session, req, points)
+        session.commit()
+
+    def boom(*args, **kwargs):
+        raise AssertionError("rule 模式不应读取 LLM profile")
+
+    monkeypatch.setattr(generation_service.settings_service, "get_text_client", boom)
+    result = generation_service.generate(
+        analyzed_project, "rule", requirement_id=rid, profile_id="deleted-profile"
+    )
+    assert result["kept"] > 0
+    assert result["mode"] == "rule"
+
+
+def test_recover_does_not_touch_recent_running_run():
+    Base.metadata.create_all(get_engine())
+    with SessionLocal() as session:
+        run = WorkflowRun(project_id="recent-project", status="running", current_stage="case_review", started_at=datetime.now(timezone.utc))
+        session.add(run)
+        session.flush()
+        session.add(WorkflowStage(run_id=run.id, stage="case_review", status="running", attempt=1, started_at=datetime.now(timezone.utc)))
+        session.commit()
+        run_id = run.id
+    workflow_service.recover_interrupted_runs()
+    with SessionLocal() as session:
+        assert session.get(WorkflowRun, run_id).status == "running"
+
+
+def test_generation_reports_rule_fallback(analyzed_project, monkeypatch):
+    rid = _create_requirement(analyzed_project, "规则兜底事件")
+    with SessionLocal() as session:
+        req = session.get(Requirement, rid)
+        points = requirement_service.parse_points(session, req, "rule")
+        requirement_service.save_points(session, req, points)
+        session.commit()
+
+    class FailingClient:
+        model = "reasoning-model"
+
+        def available(self):
+            return True
+
+        def chat_json(self, *args, **kwargs):
+            raise LlmUnavailable("只有 reasoning_content，没有最终答案")
+
+    monkeypatch.setattr(
+        generation_service.settings_service,
+        "get_text_client",
+        lambda *a, **k: FailingClient(),
+    )
+    events: list[dict] = []
+    result = generation_service.generate(
+        analyzed_project,
+        "auto",
+        requirement_id=rid,
+        on_event=events.append,
+    )
+    assert result["fallback"] is True
+    assert "reasoning_content" in result["fallbackReason"]
+    assert result["mode"] == "rule"
+    assert result["ruleCaseCount"] > 0
+    assert any(event["type"] == "fallback" for event in events)
+    assert any(
+        event["type"] == "progress" and event.get("mode") == "llm"
+        for event in events
+    )
+
+
+def test_case_generation_versions_are_isolated(analyzed_project):
+    rid = _create_requirement(analyzed_project, "生成版本隔离")
+    with SessionLocal() as session:
+        req = session.get(Requirement, rid)
+        points = requirement_service.parse_points(session, req, "rule")
+        requirement_service.save_points(session, req, points)
+        session.commit()
+
+    first = generation_service.generate(analyzed_project, "rule", requirement_id=rid)
+    second = generation_service.generate(analyzed_project, "rule", requirement_id=rid)
+    assert first["generationId"] and second["generationId"]
+    assert first["generationId"] != second["generationId"]
+
+    with SessionLocal() as session:
+        generations = generation_service.list_case_generations(session, rid)
+        assert len(generations) >= 2
+        assert generations[0]["id"] == second["generationId"]
+        assert generations[0]["isLatest"] is True
+        assert generations[1]["id"] == first["generationId"]
+        assert generations[1]["isLatest"] is False
+        first_detail = generation_service.get_case_generation(session, rid, first["generationId"])
+        assert len(first_detail["cases"]) == first["kept"]
+        assert first_detail["cases"][0]["expectedResults"]
+        # live 用例只保留最新一次，历史只存在快照里，不产生重复映射
+        mappings = list(
+            session.scalars(select(RequirementCase).where(RequirementCase.requirement_id == rid))
+        )
+        assert len(mappings) == second["kept"]

@@ -318,6 +318,8 @@ const form = reactive({
 })
 
 let pollTimer = null
+let pollFailures = 0
+let pollingBusy = false
 
 async function loadLlmProfiles() {
   try {
@@ -359,18 +361,24 @@ async function loadRuns() {
 }
 
 async function loadDetail() {
-  if (!selectedRunId.value) return
+  const runId = selectedRunId.value
+  if (!runId) return
   loadingDetail.value = true
   try {
-    detail.value = await getWorkflow(selectedRunId.value)
+    const data = await getWorkflow(runId)
+    if (selectedRunId.value !== runId) return
+    detail.value = data
     ensurePolling()
   } finally {
-    loadingDetail.value = false
+    if (selectedRunId.value === runId) loadingDetail.value = false
   }
 }
 
 async function selectRun(row) {
+  stopPolling()
   selectedRunId.value = row.id
+  detail.value = null
+  pollFailures = 0
   await loadDetail()
 }
 
@@ -395,15 +403,26 @@ async function start() {
 function ensurePolling() {
   const running = detail.value && ['pending', 'running'].includes(detail.value.status)
   if (running && !pollTimer) {
+    pollFailures = 0
     pollTimer = setInterval(async () => {
-      if (!selectedRunId.value) return
+      const runId = selectedRunId.value
+      if (!runId || pollingBusy) return
+      pollingBusy = true
       try {
-        detail.value = await getWorkflow(selectedRunId.value)
-        const list = await listWorkflows(props.projectId)
+        const [data, list] = await Promise.all([
+          getWorkflow(runId),
+          listWorkflows(props.projectId),
+        ])
+        if (selectedRunId.value !== runId) return
+        detail.value = data
         runs.value = list
-        if (!['pending', 'running'].includes(detail.value.status)) stopPolling()
+        pollFailures = 0
+        if (!['pending', 'running'].includes(data.status)) stopPolling()
       } catch {
-        stopPolling()
+        pollFailures += 1
+        if (pollFailures >= 3) stopPolling()
+      } finally {
+        pollingBusy = false
       }
     }, 2000)
   } else if (!running) {
@@ -416,6 +435,7 @@ function stopPolling() {
     clearInterval(pollTimer)
     pollTimer = null
   }
+  pollingBusy = false
 }
 
 const STATUS_LABEL = { pending: '待运行', running: '运行中', completed: '已完成', partial: '部分完成', failed: '失败', cancelled: '已取消' }

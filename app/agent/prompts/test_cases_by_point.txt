@@ -32,6 +32,7 @@
 5. 第一步必须是打开页面（type=route）；input 步骤必须给具体 inputValue；state_assert 的 expected 和 uiSelector.value 都只能有 1 个「」锚点，禁止一条断言里塞两个结果或嵌套引号
 6. 反例/边界用具体的非法值（如空值、超长串 "超过20个字符的文本"、格式错误值 "123"）
 7. 每条用例不超过 8 步；无法基于事实生成时不要输出该测试点
-8. 禁止写死列表总数/“共 N 条”/“总数变为 N 条”。需要验证数量变化时，先插入 capture 步骤读取当前数量，再用 expected 断言「共 ${base_count+1} 条订单」：
+8. expectedResults 必须是完整可读的预期句子，包含触发条件和可观察结果，不能只写一个状态标签或按钮名（如「待支付」「支付」）。列表位置/排序/操作列场景要使用具体订单号或唯一字段作为证据。
+9. 禁止写死列表总数/“共 N 条”/“总数变为 N 条”。需要验证数量变化时，先插入 capture 步骤读取当前数量，再用 expected 断言「共 ${base_count+1} 条订单」：
    {"type":"capture","action":"读取当前列表总数","target":"列表总数","uiSelector":{"type":"text","value":"共"},"expected":"","inputValue":"","variable":"base_count","pattern":"共\\s*(\\d+)\\s*条订单"}
    如果无法稳定定位总数，删除总数断言，改为断言新增行的唯一收货人/订单号或状态，绝不使用固定数字。

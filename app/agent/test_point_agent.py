@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 
 from pydantic import ValidationError
 
@@ -21,6 +22,45 @@ logger = logging.getLogger(__name__)
 
 CATEGORIES = {"functional", "negative", "boundary", "state", "api", "permission"}
 PRIORITIES = {"P0", "P1", "P2"}
+
+# 静态页面结构/固定数量不是业务测试点：
+# - “新建订单页展示5个表单字段”
+# - “列表页默认展示4条种子订单”
+# 这类数量会随页面/数据变化，应该由业务场景和运行时基线覆盖。
+STATIC_STRUCTURE_RE = re.compile(
+    r"(?:展示|显示|包含|含有|共|默认展示|默认显示)\s*\d+\s*(?:个|条|项|列|行)\s*"
+    r"[^，。；,;]{0,8}(?:字段|输入项|输入框|按钮|选项|列|行|订单|记录|数据)"
+)
+BARE_FIELD_COUNT_RE = re.compile(
+    r"\d+\s*(?:个|条|项)\s*(?:表单)?(?:字段|输入项|输入框|按钮|选项)"
+)
+BARE_STATUS_LABELS = {
+    "待支付", "已支付", "已发货", "已完成", "已取消", "已退款",
+    "支付", "发货", "完成", "取消", "退款", "查询", "重置", "提交",
+    "新建订单", "返回列表",
+}
+STRUCTURAL_TITLE_WORDS = ("第一行", "排序", "顺序", "位置", "排在", "操作列", "按钮", "展示", "显示")
+
+
+def is_static_structure_point(point: dict) -> bool:
+    text = f"{point.get('title') or ''} {point.get('description') or ''}"
+    if STATIC_STRUCTURE_RE.search(text) or BARE_FIELD_COUNT_RE.search(text):
+        return True
+    title = str(point.get("title") or "")
+    expected = str(point.get("expected") or "").strip().strip("「」『』")
+    if any(word in title for word in STRUCTURAL_TITLE_WORDS) and expected in BARE_STATUS_LABELS:
+        return True
+    return False
+
+
+def filter_static_structure_points(points: list[dict]) -> list[dict]:
+    kept: list[dict] = []
+    for point in points:
+        if is_static_structure_point(point):
+            logger.info("丢弃静态结构/固定数量测试点: %s", point.get("title"))
+            continue
+        kept.append(point)
+    return kept
 
 
 def build_prompt(
@@ -111,4 +151,4 @@ def extract_points(
         facts=facts,
     )
     raw = client.chat_json([{"role": "user", "content": prompt}], max_tokens=8192, json_mode=True)
-    return validate_points(normalize_points(raw, "llm"))
+    return filter_static_structure_points(validate_points(normalize_points(raw, "llm")))

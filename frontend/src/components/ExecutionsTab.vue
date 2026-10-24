@@ -332,7 +332,7 @@
       <el-table-column label="开始时间" width="160">
         <template #default="{ row }">{{ row.startTime ? new Date(row.startTime).toLocaleString() : '—' }}</template>
       </el-table-column>
-      <el-table-column label="操作" width="130" :fixed="isNarrow ? false : 'right'">
+      <el-table-column label="操作" width="210" :fixed="isNarrow ? false : 'right'">
         <template #default="{ row }">
           <el-button link type="primary" @click="toggleDetail(row)">详情</el-button>
           <el-button
@@ -341,6 +341,13 @@
             type="warning"
             @click="goHistory(row)"
           >历史</el-button>
+          <el-button
+            link
+            type="success"
+            :loading="rerunningId === row.id"
+            :disabled="row.status === 'running' || rerunningId === row.id"
+            @click="rerun(row)"
+          >重新执行</el-button>
         </template>
       </el-table-column>
     </el-table>
@@ -425,7 +432,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { getCoverageMatrix, getExecution, getReport, getSteps, listExecutions } from '../api/mindmap'
-import { batchLlmReview, manualReview, rerunLlmReview } from '../api/executions'
+import { batchLlmReview, executeCase, manualReview, rerunLlmReview } from '../api/executions'
 import { listRequirements } from '../api/requirements'
 import { getOverview } from '../api/stats'
 
@@ -475,6 +482,7 @@ const pageSize = ref(20)
 const total = ref(0)
 const reporting = ref(false)
 const reviewingId = ref('')
+const rerunningId = ref('')
 const batchReviewing = ref(false)
 const selectedRows = ref([])
 const isNarrow = ref(false)
@@ -572,6 +580,34 @@ async function load() {
 function applyFilter() {
   page.value = 1
   load()
+}
+
+async function rerun(row) {
+  const caseId = row.testCaseId || props.caseId
+  if (!caseId) {
+    ElMessage.warning('找不到对应测试用例，无法重新执行')
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      `重新执行用例「${row.testCaseTitle || caseId}」？会创建一条新的执行记录，原记录保留。`,
+      '重新执行',
+      { type: 'info', confirmButtonText: '开始执行', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+  const targetUrl = detailMap.value[row.id]?.detail?.targetUrl || undefined
+  rerunningId.value = row.id
+  try {
+    const result = await executeCase(props.projectId, caseId, targetUrl)
+    ElMessage.success(
+      `执行完成：${result.statusLabel || result.status}${result.executionId ? `（${result.executionId}）` : ''}`,
+    )
+    await load()
+  } finally {
+    rerunningId.value = ''
+  }
 }
 
 function onSizeChange() {

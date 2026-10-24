@@ -11,7 +11,6 @@ import base64
 import logging
 from pathlib import Path
 
-from app.config import get_settings
 from app.llm.client import LlmClient, LlmUnavailable
 from app.service import settings_service
 
@@ -23,16 +22,6 @@ VERDICT_UNAVAILABLE = "unavailable"
 
 MAX_IMAGES = 6
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
-
-
-def _effective_vision_config() -> tuple[str, str, str]:
-    """多模态配置优先；任一项为空则逐项回退到文本 LLM。返回 (key, base, model)。"""
-    s = get_settings()
-    return (
-        s.llm_vision_api_key or s.llm_api_key,
-        s.llm_vision_base_url or s.llm_base_url,
-        s.llm_vision_model or s.llm_model,
-    )
 
 
 def vision_enabled() -> bool:
@@ -274,10 +263,11 @@ def _normalize_verdict(
 
 def review_execution(case: dict, steps: list[dict], target_url: str) -> dict | None:
     """返回审核结果；未配置视觉模型时返回 None（不审核）。"""
-    if not vision_enabled():
+    client = _vision_client()
+    if not client.available():
         return None
 
-    model = _effective_vision_config()[2]
+    model = client.model
     images = _pick_images(steps)
     if not images:
         return {
@@ -307,7 +297,7 @@ def review_execution(case: dict, steps: list[dict], target_url: str) -> dict | N
         )
 
     try:
-        data = _vision_client().chat_json(
+        data = client.chat_json(
             [{"role": "user", "content": content}],
             max_tokens=2500,
             json_mode=True,

@@ -8,57 +8,127 @@
     </el-empty>
 
     <template v-else>
-      <!-- 筛选栏 -->
-      <div class="filter-bar">
-        <div class="filters">
-          <el-select v-model="filters.requirementId" placeholder="全部需求版本" clearable style="width: 160px" @change="onRequirementChange">
-            <el-option v-for="r in requirements" :key="r.id" :label="`${r.version} · ${r.name}`" :value="r.id" />
-            <el-option label="未关联版本" value="__none__" />
-          </el-select>
-          <el-tag v-if="isLatestVersion" size="small" type="success" effect="plain">最新</el-tag>
-          <el-select v-model="filters.type" placeholder="类型" clearable style="width: 120px" @change="applyFilter">
-            <el-option v-for="t in TYPES" :key="t.v" :label="t.l" :value="t.v" />
-          </el-select>
-          <el-select v-model="filters.priority" placeholder="优先级" clearable style="width: 110px" @change="applyFilter">
-            <el-option v-for="p in ['P0', 'P1', 'P2']" :key="p" :label="p" :value="p" />
-          </el-select>
-          <el-select v-model="filters.executionStatus" placeholder="执行状态" clearable style="width: 130px" @change="applyFilter">
-            <el-option v-for="s in STATUS" :key="s.v" :label="s.l" :value="s.v" />
-          </el-select>
-          <el-input
-            v-model="filters.keyword"
-            placeholder="标题关键词"
-            clearable
-            style="width: 200px"
-            @keyup.enter="applyFilter"
-            @clear="applyFilter"
-          />
-          <el-button type="primary" @click="applyFilter">查询</el-button>
+      <!-- 工具栏：版本范围 + 筛选 + 操作 -->
+      <div class="toolbar-card">
+        <div class="toolbar-top">
+          <div class="toolbar-scope">
+            <div class="field-group">
+              <span class="field-label">需求</span>
+              <el-select
+                v-model="filters.requirementId"
+                class="select-requirement"
+                placeholder="全部需求版本"
+                clearable
+                @change="onRequirementChange"
+              >
+                <el-option v-for="r in requirements" :key="r.id" :label="`${r.version} · ${r.name}`" :value="r.id" />
+                <el-option label="未关联版本" value="__none__" />
+              </el-select>
+            </div>
+            <div class="field-group">
+              <span class="field-label">生成版本</span>
+              <el-select
+                v-model="selectedGenerationId"
+                class="select-generation"
+                :disabled="!filters.requirementId || filters.requirementId === '__none__' || generationsLoading"
+                :placeholder="generationPlaceholder"
+                @change="onGenerationChange"
+              >
+                <el-option :value="LIVE_ID" label="实时用例（最新）">
+                  <span class="opt-ver">实时</span>
+                  <span class="opt-name">实时用例（最新）</span>
+                </el-option>
+                <el-option
+                  v-for="g in generations"
+                  :key="g.id"
+                  :label="generationLabel(g)"
+                  :value="g.id"
+                >
+                  <span class="opt-ver">{{ generationOptionPrefix(g) }}</span>
+                  <span class="opt-name">{{ generationLabel(g) }}</span>
+                </el-option>
+              </el-select>
+            </div>
+            <div class="version-tags">
+              <el-tag v-if="isSnapshotView" size="small" type="info" effect="plain">
+                {{ isLegacyView ? '历史归档（只读）' : '历史版本（只读）' }}
+              </el-tag>
+              <template v-else>
+                <el-tag size="small" type="success" effect="plain">实时</el-tag>
+                <el-tag v-if="generations.length" size="small" type="info" effect="plain">
+                  {{ generations.length }} 个历史版本
+                </el-tag>
+              </template>
+              <el-button v-if="isSnapshotView" link type="primary" @click="switchToLive">切到实时用例</el-button>
+            </div>
+          </div>
+          <div class="toolbar-actions">
+            <el-button class="refresh-btn" :loading="loading" title="刷新用例列表" @click="onRefresh">
+              <el-icon><Refresh /></el-icon>刷新
+            </el-button>
+            <el-upload :show-file-list="false" accept=".csv" :before-upload="onImport" :disabled="importing || isSnapshotView">
+              <el-button :loading="importing" :disabled="isSnapshotView">导入 CSV</el-button>
+            </el-upload>
+            <el-button :loading="exporting" :disabled="isSnapshotView" @click="onExport">导出 CSV</el-button>
+            <el-button
+              type="warning"
+              plain
+              :loading="aiReviewing"
+              :disabled="!rows.length || isSnapshotView"
+              @click="onAiReview"
+            >
+              AI 质检{{ selection.length ? `(${selection.length})` : '' }}
+            </el-button>
+            <el-button class="action-run-all" type="success" :loading="batchExecuting" :disabled="isSnapshotView || !rows.length" @click="onExecuteAll">全部执行</el-button>
+            <el-button v-if="selection.length && !isSnapshotView" type="primary" :loading="batchExecuting" @click="onBatchExecute">
+              批量执行({{ selection.length }})
+            </el-button>
+            <el-button v-if="selection.length && !isSnapshotView" type="danger" @click="onBatchDelete">批量删除({{ selection.length }})</el-button>
+          </div>
         </div>
-        <div class="actions">
-          <el-button :loading="loading" title="刷新" @click="load">
-            <el-icon><Refresh /></el-icon>
-          </el-button>
-          <el-upload :show-file-list="false" accept=".csv" :before-upload="onImport" :disabled="importing">
-            <el-button :loading="importing">导入 CSV</el-button>
-          </el-upload>
-          <el-button :loading="exporting" @click="onExport">导出 CSV</el-button>
-          <el-button
-            type="warning"
-            plain
-            :loading="aiReviewing"
-            :disabled="!rows.length"
-            @click="onAiReview"
-          >
-            AI 质检{{ selection.length ? `(${selection.length})` : '' }}
-          </el-button>
-          <el-button type="success" :loading="batchExecuting" @click="onExecuteAll">全部执行</el-button>
-          <el-button v-if="selection.length" type="primary" :loading="batchExecuting" @click="onBatchExecute">
-            批量执行({{ selection.length }})
-          </el-button>
-          <el-button v-if="selection.length" type="danger" @click="onBatchDelete">批量删除({{ selection.length }})</el-button>
+
+        <div class="toolbar-filters">
+          <div class="filter-fields">
+            <el-select v-model="filters.type" class="select-type" placeholder="类型" clearable @change="applyFilter">
+              <el-option v-for="t in TYPES" :key="t.v" :label="t.l" :value="t.v" />
+            </el-select>
+            <el-select v-model="filters.priority" class="select-priority" placeholder="优先级" clearable @change="applyFilter">
+              <el-option v-for="p in ['P0', 'P1', 'P2']" :key="p" :label="p" :value="p" />
+            </el-select>
+            <el-select
+              v-model="filters.executionStatus"
+              class="select-status"
+              placeholder="执行状态"
+              clearable
+              :disabled="isSnapshotView"
+              @change="applyFilter"
+            >
+              <el-option v-for="s in STATUS" :key="s.v" :label="s.l" :value="s.v" />
+            </el-select>
+            <el-input
+              v-model="filters.keyword"
+              class="input-keyword"
+              placeholder="标题关键词"
+              clearable
+              @keyup.enter="applyFilter"
+              @clear="applyFilter"
+            />
+          </div>
+          <div class="filter-actions">
+            <el-button type="primary" @click="applyFilter">查询</el-button>
+            <el-button @click="resetFilters">重置</el-button>
+          </div>
         </div>
       </div>
+
+      <el-alert
+        v-if="isSnapshotView"
+        :title="`当前查看${isLegacyView ? '历史归档' : '历史生成版本'}快照（只读）：执行、编辑、删除、AI 质检请切换到「实时用例」`"
+        type="info"
+        show-icon
+        :closable="false"
+        class="mb"
+      />
 
       <el-table
         ref="tableRef"
@@ -70,20 +140,25 @@
         :empty-text="emptyText"
         @selection-change="(v) => (selection = v)"
       >
-        <el-table-column v-if="!isNarrow" type="selection" width="45" />
-        <el-table-column prop="projectSeq" label="#" width="55" />
-        <el-table-column v-if="!isNarrow" label="需求版本" width="110">
+        <el-table-column v-if="!isNarrow && !isSnapshotView" type="selection" width="45" align="center" />
+        <el-table-column v-if="!isNarrow" type="index" label="#" width="55" align="center" :index="rowIndex" />
+        <el-table-column v-if="!isNarrow" label="需求版本" width="110" align="center">
           <template #default="{ row }">
             <el-tag v-if="row.requirementId" size="small" effect="plain">{{ requirementLabel(row.requirementId) }}</el-tag>
             <span v-else class="muted">—</span>
           </template>
         </el-table-column>
-        <el-table-column prop="title" label="标题" min-width="200" show-overflow-tooltip />
-        <el-table-column v-if="!isNarrow" label="类型" width="80">
+        <el-table-column prop="title" label="标题" :min-width="isNarrow ? 140 : 200" show-overflow-tooltip />
+        <el-table-column v-if="!isNarrow" label="类型" width="80" align="center">
           <template #default="{ row }"><el-tag size="small" :type="typeTag(row.type)">{{ typeLabel(row.type) }}</el-tag></template>
         </el-table-column>
-        <el-table-column prop="priority" label="优先级" width="76" />
-        <el-table-column v-if="!isNarrow" label="质量分" width="80">
+        <el-table-column prop="priority" label="优先级" width="76" align="center" />
+        <el-table-column v-if="!isNarrow" label="来源" width="80" align="center">
+          <template #default="{ row }">
+            <el-tag size="small" effect="plain" :type="sourceTag(row.source)">{{ sourceLabel(row.source) }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column v-if="!isNarrow" label="质量分" width="80" align="center">
           <template #default="{ row }">
             <el-tag
               size="small"
@@ -91,7 +166,7 @@
             >{{ row.qualityScore }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column v-if="!isNarrow" label="AI 质检" width="104">
+        <el-table-column v-if="!isNarrow && !isSnapshotView" label="AI 质检" width="104" align="center">
           <template #default="{ row }">
             <el-tooltip
               v-if="caseReviewMap[row.id]"
@@ -110,7 +185,10 @@
             <span v-else class="muted">—</span>
           </template>
         </el-table-column>
-        <el-table-column label="执行状态" width="90">
+        <el-table-column v-if="isSnapshotView" label="预期结果" :min-width="isNarrow ? 150 : 220" show-overflow-tooltip>
+          <template #default="{ row }">{{ (row.expectedResults || []).join(' / ') || '—' }}</template>
+        </el-table-column>
+        <el-table-column v-if="!isSnapshotView" label="执行状态" width="90" align="center">
           <template #default="{ row }">
             <el-tooltip :content="row.executionStatusDescription || execDescription(row.executionStatus)" placement="top">
               <el-tag size="small" :type="row.executionStatusTag || execTag(row.executionStatus)">
@@ -119,12 +197,37 @@
             </el-tooltip>
           </template>
         </el-table-column>
-        <el-table-column label="操作" :width="isNarrow ? 155 : 210" :fixed="isNarrow ? false : 'right'">
+        <el-table-column
+          label="操作"
+          :width="isSnapshotView ? 70 : isNarrow ? 80 : 210"
+          fixed="right"
+          align="center"
+        >
           <template #default="{ row }">
-            <el-button link type="success" :loading="executingId === row.id" @click="onExecute(row)">执行</el-button>
-            <el-button link type="primary" @click="openEdit(row)">编辑</el-button>
-            <el-button v-if="!isNarrow" link @click="openVersions(row)">版本</el-button>
-            <el-button link type="danger" @click="onDelete(row)">删除</el-button>
+            <span v-if="isSnapshotView" class="muted">只读</span>
+            <el-dropdown
+              v-else-if="isNarrow"
+              trigger="click"
+              @command="(command) => onCaseCommand(command, row)"
+            >
+              <el-button link type="primary">
+                更多<el-icon class="el-icon--right"><ArrowDown /></el-icon>
+              </el-button>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item command="execute">执行</el-dropdown-item>
+                  <el-dropdown-item command="edit">编辑</el-dropdown-item>
+                  <el-dropdown-item command="history">编辑历史</el-dropdown-item>
+                  <el-dropdown-item command="delete" divided>删除</el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
+            <div v-else class="case-actions">
+              <el-button link type="success" :loading="executingId === row.id" @click="onExecute(row)">执行</el-button>
+              <el-button link type="primary" @click="openEdit(row)">编辑</el-button>
+              <el-button link @click="openVersions(row)">编辑历史</el-button>
+              <el-button link type="danger" @click="onDelete(row)">删除</el-button>
+            </div>
           </template>
         </el-table-column>
       </el-table>
@@ -268,7 +371,7 @@
       </el-drawer>
 
       <!-- 版本对话框 -->
-      <el-dialog v-model="versionVisible" title="版本历史" width="600px">
+      <el-dialog v-model="versionVisible" title="用例编辑历史" width="600px">
         <el-table :data="versions" size="small" border :empty-text="versionsLoading ? '加载中...' : '暂无版本记录'">
           <el-table-column prop="version" label="版本" width="70" />
           <el-table-column prop="changeNote" label="说明" show-overflow-tooltip />
@@ -295,9 +398,10 @@ import {
   rollbackVersion, updateTestcase,
 } from '../api/testcases'
 import { batchExecute, executeCase } from '../api/executions'
-import { listRequirements } from '../api/requirements'
+import { getGeneration, listGenerations, listRequirements } from '../api/requirements'
 import ProjectSidebar from '../components/ProjectSidebar.vue'
 import { useConfigStore } from '../stores/config'
+import { LIVE_GENERATION_ID as LIVE_ID, generationLabel, generationOptionPrefix } from '../utils/generation'
 
 // 独立页面不传 projectId，读全局；嵌入项目详情页时以路由项目为准
 const props = defineProps({
@@ -354,17 +458,25 @@ const selection = ref([])
 const requirements = ref([])
 const filters = reactive({ requirementId: '', type: '', priority: '', executionStatus: '', keyword: '' })
 const requirementMap = computed(() => Object.fromEntries(requirements.value.map((r) => [r.id, r])))
+const generations = ref([])
+const selectedGenerationId = ref(LIVE_ID)
+const generationsLoading = ref(false)
+const snapshotCases = ref([])
+const snapshotLoadedId = ref('')
+const isSnapshotView = computed(() => selectedGenerationId.value !== LIVE_ID)
+const isLegacyView = computed(
+  () => generations.value.find((g) => g.id === selectedGenerationId.value)?.mode === 'legacy',
+)
+const generationPlaceholder = computed(() => {
+  if (!filters.requirementId || filters.requirementId === '__none__') return '先选择需求版本'
+  return generations.value.length ? '选择生成版本' : '实时用例（未归档）'
+})
 // 用户是否手动改过版本筛选；未改过时始终跟随最新版本
 const versionTouched = ref(false)
-const latestRequirementId = computed(() =>
-  requirements.value.length ? requirements.value[requirements.value.length - 1].id : null,
-)
-const isLatestVersion = computed(
-  () => !!filters.requirementId && filters.requirementId === latestRequirementId.value,
-)
 
 const emptyText = computed(() => {
   if (loading.value) return '加载中...'
+  if (isSnapshotView.value) return '该版本快照没有符合当前筛选条件的用例'
   if (filters.requirementId === '__none__') return '没有未关联需求版本的用例'
   if (filters.requirementId) {
     const r = requirementMap.value[filters.requirementId]
@@ -416,13 +528,65 @@ async function loadRequirements() {
   }
 }
 
-function onRequirementChange() {
+async function loadGenerations() {
+  const rid = filters.requirementId
+  if (!rid || rid === '__none__') {
+    generations.value = []
+    selectedGenerationId.value = LIVE_ID
+    snapshotCases.value = []
+    snapshotLoadedId.value = ''
+    return
+  }
+  generationsLoading.value = true
+  try {
+    generations.value = await listGenerations(rid)
+  } catch {
+    generations.value = []
+  } finally {
+    generationsLoading.value = false
+  }
+  if (!generations.value.some((g) => g.id === selectedGenerationId.value)) {
+    selectedGenerationId.value = LIVE_ID
+    snapshotCases.value = []
+    snapshotLoadedId.value = ''
+  }
+}
+
+async function onRequirementChange() {
   versionTouched.value = true
+  selectedGenerationId.value = LIVE_ID
+  snapshotCases.value = []
+  snapshotLoadedId.value = ''
+  selection.value = []
+  await loadGenerations()
   applyFilter()
+}
+
+async function onGenerationChange() {
+  selection.value = []
+  filters.executionStatus = ''
+  page.value = 1
+  if (isSnapshotView.value) {
+    snapshotCases.value = []
+    snapshotLoadedId.value = ''
+    editVisible.value = false
+    versionVisible.value = false
+    aiReviewVisible.value = false
+  }
+  await load()
+}
+
+async function switchToLive() {
+  selectedGenerationId.value = LIVE_ID
+  await onGenerationChange()
 }
 
 async function load() {
   if (!projectId.value) return
+  if (isSnapshotView.value) {
+    await loadSnapshot()
+    return
+  }
   loading.value = true
   try {
     const data = await listTestcases(projectId.value, queryParams())
@@ -433,9 +597,58 @@ async function load() {
   }
 }
 
+async function loadSnapshot() {
+  const rid = filters.requirementId
+  const gid = selectedGenerationId.value
+  if (!rid || !gid || gid === LIVE_ID) return
+  loading.value = true
+  try {
+    if (snapshotLoadedId.value !== gid) {
+      const data = await getGeneration(rid, gid)
+      snapshotCases.value = data.cases || []
+      snapshotLoadedId.value = gid
+    }
+    const keyword = (filters.keyword || '').trim().toLowerCase()
+    const filtered = snapshotCases.value.filter((item) => {
+      if (filters.type && item.type !== filters.type) return false
+      if (filters.priority && item.priority !== filters.priority) return false
+      if (keyword && !String(item.title || '').toLowerCase().includes(keyword)) return false
+      return true
+    })
+    total.value = filtered.length
+    const maxPage = Math.max(1, Math.ceil(total.value / pageSize.value))
+    if (page.value > maxPage) page.value = maxPage
+    const start = (page.value - 1) * pageSize.value
+    rows.value = filtered.slice(start, start + pageSize.value).map((item, index) => ({
+      ...item,
+      projectSeq: item.projectSeq || start + index + 1,
+      requirementId: rid,
+    }))
+  } finally {
+    loading.value = false
+  }
+}
+
+function onRefresh() {
+  snapshotLoadedId.value = ''
+  load()
+}
+
+function rowIndex(index) {
+  return (page.value - 1) * pageSize.value + index + 1
+}
+
 function applyFilter() {
   page.value = 1
   load()
+}
+
+function resetFilters() {
+  filters.type = ''
+  filters.priority = ''
+  filters.executionStatus = ''
+  filters.keyword = ''
+  applyFilter()
 }
 
 function onSizeChange() {
@@ -481,7 +694,21 @@ function issueLabel(severity) {
   return { blocker: '阻断', warning: '警告', info: '提示' }[severity] || severity
 }
 
+function ensureWritable() {
+  if (!isSnapshotView.value) return true
+  ElMessage.warning('历史版本只读，请先切换到「实时用例」')
+  return false
+}
+
+function onCaseCommand(command, row) {
+  if (command === 'execute') onExecute(row)
+  else if (command === 'edit') openEdit(row)
+  else if (command === 'history') openVersions(row)
+  else if (command === 'delete') onDelete(row)
+}
+
 async function onAiReview() {
+  if (!ensureWritable()) return
   const requestId = ++aiReviewRequestId
   const ids = selection.value.length
     ? selection.value.map((row) => row.id)
@@ -522,6 +749,7 @@ function openAiReviewDialog(caseId) {
 }
 
 async function onAiRepair(result) {
+  if (!ensureWritable()) return
   if (!result?.caseId) return
   aiFixingId.value = result.caseId
   try {
@@ -543,6 +771,7 @@ async function onAiRepair(result) {
 }
 
 async function onExecute(row) {
+  if (!ensureWritable()) return
   executingId.value = row.id
   try {
     const r = await executeCase(projectId.value, row.id)
@@ -562,6 +791,7 @@ async function onExecute(row) {
 }
 
 async function onBatchExecute() {
+  if (!ensureWritable()) return
   if (!selection.value.length) return ElMessage.warning('请先勾选用例')
   batchExecuting.value = true
   try {
@@ -573,6 +803,7 @@ async function onBatchExecute() {
 }
 
 async function onExecuteAll() {
+  if (!ensureWritable()) return
   if (!projectId.value) return
   batchExecuting.value = true
   try {
@@ -593,6 +824,7 @@ async function onExecuteAll() {
 }
 
 function openEdit(row) {
+  if (!ensureWritable()) return
   const copy = JSON.parse(JSON.stringify(row))
   Object.assign(edit, copy)
   edit.preconditionsText = (row.preconditions || []).join('\n')
@@ -667,6 +899,7 @@ async function saveEdit() {
 }
 
 async function openVersions(row) {
+  if (!ensureWritable()) return
   versionCaseId.value = row.id
   versionVisible.value = true
   versionsLoading.value = true
@@ -695,6 +928,7 @@ async function onRollback(v) {
 }
 
 async function onDelete(row) {
+  if (!ensureWritable()) return
   if (!(await confirmAction(`删除「${row.title}」？`, '确认删除'))) return
   await deleteTestcase(projectId.value, row.id)
   ElMessage.success('已删除')
@@ -703,6 +937,7 @@ async function onDelete(row) {
 }
 
 async function onBatchDelete() {
+  if (!ensureWritable()) return
   if (!selection.value.length) return
   const count = selection.value.length
   if (!(await confirmAction(`删除选中的 ${count} 条用例？`, '确认删除'))) return
@@ -714,6 +949,7 @@ async function onBatchDelete() {
 }
 
 async function onExport() {
+  if (!ensureWritable()) return
   exporting.value = true
   try {
     const blob = await exportCsv(projectId.value)
@@ -729,6 +965,7 @@ async function onExport() {
 }
 
 async function onImport(file) {
+  if (!ensureWritable()) return false
   importing.value = true
   try {
     const r = await importCsv(projectId.value, file)
@@ -745,6 +982,12 @@ function typeTag(t) {
 }
 function typeLabel(t) {
   return { positive: '正例', negative: '反例', boundary: '边界', state: '流转' }[t] || t
+}
+function sourceLabel(source) {
+  return { ai: 'LLM', rule: '规则', manual: '手工', import: '导入' }[source] || source || '—'
+}
+function sourceTag(source) {
+  return { ai: 'success', rule: 'info', manual: 'primary', import: 'warning' }[source] || 'info'
 }
 function execTag(s) {
   return {
@@ -775,6 +1018,7 @@ onMounted(async () => {
   narrowMq.addEventListener('change', onNarrowChange)
   // 先确定默认版本，再拉用例，避免先闪一次“全部版本”
   await loadRequirements()
+  await loadGenerations()
   load()
 })
 onBeforeUnmount(() => narrowMq.removeEventListener('change', onNarrowChange))
@@ -783,17 +1027,23 @@ watch(projectId, async () => {
   selection.value = []
   versionTouched.value = false
   filters.requirementId = ''
+  generations.value = []
+  selectedGenerationId.value = LIVE_ID
+  snapshotCases.value = []
+  snapshotLoadedId.value = ''
   aiReviewRequestId += 1
   aiReviewResults.value = []
   caseReviewMap.value = {}
   aiReviewVisible.value = false
   aiFixingId.value = ''
   await loadRequirements()
+  await loadGenerations()
   load()
 })
 // 进入页面 / 生成完成后由父组件触发刷新（顺手刷新版本筛选项）
 watch(() => props.refreshKey, async () => {
   await loadRequirements()
+  await loadGenerations()
   load()
 })
 </script>
@@ -808,23 +1058,105 @@ watch(() => props.refreshKey, async () => {
   flex: 1;
   min-width: 0;
 }
-.filter-bar {
+.toolbar-card {
   display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px;
   margin-bottom: 12px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 8px;
+  background: var(--el-bg-color);
 }
-.filters,
-.actions {
+.toolbar-top {
   display: flex;
-  gap: 10px;
-  align-items: center;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
   flex-wrap: wrap;
 }
-.actions {
+.toolbar-scope {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+.field-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.field-label {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+  white-space: nowrap;
+  line-height: 32px;
+}
+.select-requirement {
+  width: 190px;
+}
+.select-generation {
+  width: 320px;
+}
+.version-tags {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
   margin-left: auto;
+}
+.refresh-btn .el-icon {
+  margin-right: 4px;
+}
+.toolbar-filters {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding-top: 12px;
+  border-top: 1px dashed var(--el-border-color-lighter);
+}
+.filter-fields {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+}
+.filter-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+.toolbar-card .el-button + .el-button {
+  margin-left: 0;
+}
+.select-type {
+  width: 120px;
+}
+.select-priority {
+  width: 110px;
+}
+.select-status {
+  width: 130px;
+}
+.input-keyword {
+  width: 220px;
+}
+.opt-ver {
+  margin-right: 8px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
 }
 .mb {
   margin-bottom: 12px;
@@ -835,6 +1167,18 @@ watch(() => props.refreshKey, async () => {
 }
 .review-link {
   cursor: pointer;
+}
+.case-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+.case-actions .el-button {
+  margin-left: 0;
+  padding: 0;
+  font-size: 12px;
 }
 .ai-review-item {
   padding: 14px 0;
@@ -912,10 +1256,63 @@ watch(() => props.refreshKey, async () => {
   .page-content {
     width: 100%;
   }
-  .filter-bar {
-    justify-content: flex-start;
+  .toolbar-card {
+    padding: 10px;
   }
-  .actions {
+  .toolbar-top {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .toolbar-scope {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+  .field-group {
+    width: 100%;
+  }
+  .field-group .el-select {
+    flex: 1;
+    width: auto;
+  }
+  .version-tags {
+    min-height: 24px;
+  }
+  .toolbar-actions {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    width: 100%;
+    margin-left: 0;
+  }
+  .toolbar-actions .el-button,
+  .toolbar-actions .el-upload {
+    width: 100%;
+  }
+  .toolbar-actions .el-upload .el-button {
+    width: 100%;
+  }
+  .toolbar-actions .action-run-all {
+    grid-column: span 2;
+  }
+  .toolbar-filters {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+  .filter-fields {
+    display: contents;
+  }
+  .filter-actions {
+    grid-column: 1 / -1;
+    margin-left: 0;
+  }
+  .filter-actions .el-button {
+    flex: 1;
+  }
+  .select-type,
+  .select-priority,
+  .select-status,
+  .input-keyword {
     width: 100%;
   }
 }

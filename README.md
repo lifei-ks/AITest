@@ -256,7 +256,7 @@ AI 审核结论：
 
 ## 数据模型
 
-启动时由 SQLAlchemy `create_all` 自动建表（也提供 `migrations/mysql/001_init.sql`，共 21 张表），核心表：
+启动时由 SQLAlchemy `create_all` 自动建表（也提供 `migrations/mysql/001_init.sql`，共 23 张表），核心表：
 
 - `projects` / `code_analyses` / `state_machines`
 - `requirements`（需求版本）/ `test_points`（测试点）
@@ -265,6 +265,8 @@ AI 审核结论：
 - `execution_reviews` / `execution_review_images`（逐图分析）/ `execution_review_issues`（问题定位）
 - `workflow_runs` / `workflow_stages` / `workflow_cases` / `workflow_case_reviews` / `workflow_result_analyses`（多 Agent 工作流）
 - `llm_profiles`（文本/VLM 多套 LLM 配置）
+- `id_sequences`（跨进程 TC 编号与项目内序号序列）
+- `case_generations`（每次用例生成的版本快照）
 
 ## 验证
 
@@ -294,7 +296,12 @@ cd frontend && npm run build             # 前端构建
 - Pipeline 快速创建项目仍按本机源码路径登记；源码压缩包上传和 Git 自动拉取尚未实现。
 - 共享测试数据没有通用自动 reset；数量变化使用 `capture` 运行时基线，固定总数且无创建动作的用例会被拒绝/丢弃。
 - LLM API Key 保存在服务端 `.env` / 数据库，接口只返回掩码；请限制服务器与数据库访问权限。
-- 评估实验的 `cost` 为 `null`：`LlmClient` 未采集 token usage；只报告真实调用次数与耗时。
+- 推理模型由客户端自动适配：GLM-5.3/5.2 自动降 `reasoning_effort=low`；content 为空时接受 reasoning_content 中的合法 JSON；`finish_reason=length` 时提升 token 预算重试一次。只有仍拿不到最终答案才规则兜底。
+- LLM 返回的 `expectedResults` 若是单个字符串会整体保留，不会逐字符拆分；历史逐字符脏数据在读取时自动归一化，已有用例可用 `scripts/fix_expected_results.py` 修复。
+- 测试点生成会过滤“展示 N 个字段/默认 N 条数据”这类静态页面结构测试点，字段存在性由用例事实和运行时断言覆盖。
+- 用例生成使用 SSE：页面显示逐批进度、逐条用例和来源（LLM/规则）；LLM 降级时页面明确提示规则兜底原因。
+- 每次生成保存版本快照；生成页和测试用例页都始终显示版本下拉，提供「实时用例（未归档）」和按时间倒序的生成快照。改造前已有的实时用例首次查看时自动归档为「历史归档」版本，不会把多次生成混在一起；live 用例始终只保留最新一次，避免跨版本重复。测试用例页查看历史版本时只读，执行/编辑/删除/AI 质检需切回实时用例。
+- 评估实验的 `cost` 为 `null`：客户端虽然记录了响应 usage 用于诊断，但未把它纳入成本估算；只报告真实调用次数与耗时。
 - 工作流按单需求版本串行执行；同一需求顺序做基线与方案对比属于配对观察，不是独立随机样本。
 
 ## 发布到 GitHub

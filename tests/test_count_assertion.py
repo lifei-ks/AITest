@@ -99,3 +99,11 @@ def test_resolve_variables_and_missing_variable():
     with pytest.raises(_StepError) as exc:
         _resolve_variables("共 ${missing+1} 条", {})
     assert "未捕获" in exc.value.message
+
+
+def test_normalize_drops_ambiguous_list_routes():
+    case = _new_order_case()
+    case["expectedResults"] = ["提交订单后总数变为 5 条"]
+    result = normalize_case_counts(case, ["/orders/list", "/admin/order-list"])
+    assert result["changed"] is False
+    assert result["drop"] is True

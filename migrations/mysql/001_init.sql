@@ -1,8 +1,26 @@
 -- AICase Core MySQL 初始化 DDL（由 scripts/gen_mysql_ddl.py 生成）
 -- 建库后执行：mysql -u root -p <库名> < migrations/mysql/001_init.sql
--- 共 21 张表
+-- 共 23 张表
 
 SET NAMES utf8mb4;
+
+
+CREATE TABLE case_generations (
+	id VARCHAR(36) NOT NULL, 
+	project_id VARCHAR(36) NOT NULL, 
+	requirement_id VARCHAR(36), 
+	mode VARCHAR(20) NOT NULL, 
+	profile_id VARCHAR(36), 
+	case_count INTEGER NOT NULL, 
+	summary TEXT, 
+	snapshot TEXT, 
+	created_at DATETIME NOT NULL, 
+	PRIMARY KEY (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE INDEX ix_case_generations_project ON case_generations (project_id, created_at);
+CREATE INDEX ix_case_generations_project_id ON case_generations (project_id);
+CREATE INDEX ix_case_generations_requirement ON case_generations (requirement_id, created_at);
+CREATE INDEX ix_case_generations_requirement_id ON case_generations (requirement_id);
 
 
 CREATE TABLE code_analyses (
@@ -127,6 +145,14 @@ CREATE TABLE execution_steps (
 	PRIMARY KEY (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 CREATE INDEX ix_execution_steps_execution_id ON execution_steps (execution_id);
+
+
+CREATE TABLE id_sequences (
+	name VARCHAR(50) NOT NULL, 
+	value INTEGER NOT NULL, 
+	updated_at DATETIME NOT NULL, 
+	PRIMARY KEY (name)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 
 CREATE TABLE llm_profiles (

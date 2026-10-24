@@ -18,7 +18,7 @@ import logging
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from sqlalchemy import select
@@ -403,6 +403,8 @@ def _run_workflow(run_id: str) -> None:
                     # 分析/生成失败后不再继续依赖后续阶段；报告阶段仍会执行
                     if stage_name in ("code_analysis", "test_points", "case_generation"):
                         hard_failure = True
+                elif result.get("partial"):
+                    had_failure = True
             except Exception as exc:  # noqa: BLE001 - 阶段失败必须落库
                 logger.exception("工作流阶段失败 run=%s stage=%s", run_id, stage_name)
                 try:
@@ -487,8 +489,26 @@ def _has_completed_work(session: Session, run: WorkflowRun) -> bool:
     return any(stage != "report" for stage in completed)
 
 
-def recover_interrupted_runs() -> int:
-    """服务重启后把内存线程已丢失的 running 运行标记为 failed，避免假运行状态。"""
+def _as_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+
+
+def _run_last_activity(session: Session, run: WorkflowRun) -> datetime | None:
+    candidates = [_as_utc(run.started_at), _as_utc(run.created_at)]
+    for stage in session.scalars(select(WorkflowStage).where(WorkflowStage.run_id == run.id)):
+        candidates.extend([_as_utc(stage.started_at), _as_utc(stage.finished_at)])
+    values = [item for item in candidates if item is not None]
+    return max(values) if values else None
+
+
+def recover_interrupted_runs(stale_seconds: int = 7200) -> int:
+    """只回收长时间无活动的 running 运行，避免多 worker 启动时误杀活跃 Pipeline。
+
+    没有独立心跳字段：用运行和阶段的最新 started_at/finished_at 作为活动时间。
+    阈值默认 2 小时，远大于单次 LLM/Playwright 的正常耗时。
+    """
     session = SessionLocal()
     try:
         runs = list(
@@ -497,6 +517,12 @@ def recover_interrupted_runs() -> int:
             )
         )
         now = _now()
+        cutoff = now - timedelta(seconds=max(0, int(stale_seconds)))
+        runs = [
+            run
+            for run in runs
+            if (_run_last_activity(session, run) or now) <= cutoff
+        ]
         for run in runs:
             run.status = "failed"
             run.current_stage = None
@@ -835,7 +861,7 @@ def _case_proxy(case: dict, test_point_id: str | None = None) -> SimpleNamespace
     return SimpleNamespace(
         title=case.get("title") or "",
         structured_steps=case.get("structuredSteps") or [],
-        expected_results=case.get("expectedResults") or [],
+        expected_results=generation_service._as_text_list(case.get("expectedResults")),
         coverage_refs=case.get("coverageRefs") or {},
         test_point_id=test_point_id,
     )
@@ -1455,6 +1481,7 @@ def _stage_execution(session: Session, run: WorkflowRun, config: dict) -> dict:
         "approved": len(approved),
         "executed": len(executed),
         "failedToStart": len(errors),
+        "partial": bool(errors and executed),
         "errors": errors,
         "byStatus": _counts(item.get("status") for item in executed),
         "executions": executed,
@@ -1473,7 +1500,8 @@ def _stage_execution(session: Session, run: WorkflowRun, config: dict) -> dict:
         session,
         stage,
         "completed",
-        f"执行 {len(executed)}/{len(approved)} 条；启动失败 {len(errors)} 条",
+        f"执行 {len(executed)}/{len(approved)} 条；启动失败 {len(errors)} 条"
+        + ("（部分失败）" if errors else ""),
         payload,
     )
     return {"status": "completed", **payload}

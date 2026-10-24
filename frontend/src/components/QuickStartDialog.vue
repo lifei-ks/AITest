@@ -136,6 +136,13 @@ async function submit() {
     ElMessage.warning('请选择需求文档，或改为粘贴文本')
     return
   }
+  if (!form.name.trim()) return ElMessage.warning('项目名称不能只包含空白')
+  if (!form.sourcePath.trim()) return ElMessage.warning('源码路径不能只包含空白')
+  if (!form.version.trim()) return ElMessage.warning('版本号不能只包含空白')
+  if (!form.requirementName.trim()) return ElMessage.warning('需求名称不能只包含空白')
+  if (prdMode.value === 'text' && !form.prdText.trim()) {
+    return ElMessage.warning('需求内容不能只包含空白')
+  }
 
   saving.value = true
   let project = null

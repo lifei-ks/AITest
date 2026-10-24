@@ -87,6 +87,16 @@ def list_points(rid: str, session: Session = Depends(get_session)):
     return ok(requirement_service.list_test_points(session, rid))
 
 
+@router.get("/api/requirements/{rid}/generations")
+def list_generations(rid: str, limit: int = Query(50, ge=1, le=100), session: Session = Depends(get_session)):
+    return ok(generation_service.list_case_generations(session, rid, limit))
+
+
+@router.get("/api/requirements/{rid}/generations/{generation_id}")
+def get_generation(rid: str, generation_id: str, session: Session = Depends(get_session)):
+    return ok(generation_service.get_case_generation(session, rid, generation_id))
+
+
 @router.post("/api/requirements/{rid}/generate")
 def generate(rid: str, payload: GeneratePayload):
     return ok(generation_service.generate_requirement(rid, payload.mode, profile_id=payload.llmProfileId))

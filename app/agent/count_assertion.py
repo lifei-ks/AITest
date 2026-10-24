@@ -38,17 +38,21 @@ def _count_pattern(anchor: str) -> str:
 
 
 def _list_route(case: dict, list_routes: list[str]) -> str:
+    """返回唯一可确定的列表路由；多个候选时返回空，避免在错误页面建立基线。"""
     text = " ".join(
         [*(case.get("expectedResults") or []), *(case.get("steps") or [])]
     )
-    for match in ROUTE_RE.finditer(text):
-        route = match.group(0)
-        if "list" in route.lower():
-            return route
-    for route in list_routes:
-        if "list" in (route or "").lower():
-            return route
-    return ""
+    explicit = {
+        match.group(0)
+        for match in ROUTE_RE.finditer(text)
+        if "list" in match.group(0).lower()
+    }
+    if len(explicit) == 1:
+        return explicit.pop()
+    if len(explicit) > 1:
+        return ""
+    candidates = {route for route in list_routes if route and "list" in route.lower()}
+    return candidates.pop() if len(candidates) == 1 else ""
 
 
 def _has_create_action(steps: list[dict], before_index: int) -> bool:
