@@ -58,8 +58,16 @@
 - 4 个逻辑角色：测试点生成、可执行用例生成、独立用例审核/修订、证据驱动结果分析
 - 审核使用「确定性校验 + LLM 建议」：复合场景/多输入/缺必填字段会被拦截；不通过不执行，超过修订上限转 `reject`，不静默丢弃
 - 结果分析只写自己的分析表，**绝不覆盖真实执行状态**；证据不足一律 `unknown` 并交人工复核
+- 数量断言不再写死：固定「共 N 条」会自动改写为 `capture` 基线 + `${base_count+1}`；无法建立基线的固定总数用例不执行
 - 不接入工作流时，原有需求解析/生成/执行接口行为不变
 - 详细设计、API、实验方法与限制见 [docs/MULTI_AGENT_WORKFLOW.md](docs/MULTI_AGENT_WORKFLOW.md)
+
+### 10. 多 LLM 配置
+- 设置页分「文本 LLM」和「多模态 VLM」两组，每组可配置多条，独立保存名称、API Key、Base URL、模型
+- 测试点解析、用例生成可分别选择文本 LLM；Pipeline 高级配置里可分别选择测试点 LLM 和用例 LLM
+- VLM 用于执行截图审核；没有可用 VLM 时回退默认文本 LLM
+- 首次读取设置时会把 `.env` 的单套文本/多模态配置迁移成默认 profile；之后以设置页配置为准
+- API 只返回掩码 Key；更新时回传掩码表示保留原 Key
 
 ## 架构
 
@@ -139,8 +147,8 @@ cd frontend && npm run dev
 | `DATABASE_URL` | SQLite 或 MySQL 连接串 | `sqlite:///./data/aicase.db` |
 | `OUTPUT_DIR` | 截图/录屏/报告输出目录 | `./outputs` |
 | `TARGET_URL_DEFAULT` | 被测站点默认地址 | `http://127.0.0.1:8200` |
-| `LLM_API_KEY` / `LLM_BASE_URL` / `LLM_MODEL` | 文本 LLM（需求解析、用例生成） | 空 = 纯规则模式 |
-| `LLM_VISION_API_KEY` / `LLM_VISION_BASE_URL` / `LLM_VISION_MODEL` | 多模态 LLM（截图审核）；留空自动复用文本 LLM | 空 |
+| `LLM_API_KEY` / `LLM_BASE_URL` / `LLM_MODEL` | 文本 LLM 初始配置；首次读取设置时迁移为默认 profile | 空 = 纯规则模式 |
+| `LLM_VISION_API_KEY` / `LLM_VISION_BASE_URL` / `LLM_VISION_MODEL` | 多模态初始配置；留空自动复用默认文本 profile | 空 |
 
 ## 使用流程
 
@@ -149,10 +157,11 @@ cd frontend && npm run dev
 2. 进入项目 → 触发代码分析
 3. 「需求版本」→ 新建 V1.0，填写/上传本期需求文档 → 解析测试点
 4. 「用例生成」→ 选版本 → 生成用例（自动/LLM/规则）
-5. 「测试用例」→ 执行单条/批量
-6. 「执行结果」→ 查看截图、录屏、AI 审核报告；待复核的人工处理；同一用例多次执行时点「历史」进入独立页面查看全部记录
-7. 侧边栏「Pipeline 执行」→ 可快速创建项目并上传需求文档 → 选需求版本 → 一键完成代码分析、测试点、用例、审核/修订、执行、结果分析、报告
-8. 「脑图」/「下载 HTML 报告」按需导出
+5. 「设置」→ 文本 LLM / VLM 可分别配置多条，并选择默认
+6. 「测试用例」→ 执行单条/批量
+7. 「执行结果」→ 查看截图、录屏、AI 审核报告；待复核的人工处理；同一用例多次执行时点「历史」进入独立页面查看全部记录
+8. 侧边栏「Pipeline 执行」→ 可快速创建项目并上传需求文档 → 选需求版本 → 一键完成代码分析、测试点、用例、审核/修订、执行、结果分析、报告
+9. 「脑图」/「下载 HTML 报告」按需导出
 ```
 
 ## 目录结构
@@ -187,6 +196,10 @@ main.py           便捷入口
 | POST | `/api/executions/batch-llm-review` | 批量 AI 审核 |
 | POST | `/api/executions/{eid}/review` | 人工复核（pass/fail） |
 | GET | `/api/meta/execution` | 执行状态、AI 结论和错误分类的完整枚举说明 |
+| GET/POST | `/api/settings/llm-profiles` | 多 LLM 配置列表 / 新增 |
+| PUT/DELETE | `/api/settings/llm-profiles/{id}` | 修改 / 删除配置 |
+| POST | `/api/settings/llm-profiles/{id}/default` | 设为同类默认配置 |
+| POST | `/api/settings/llm-profiles/{id}/test` | 测试该配置连通性 |
 | POST | `/api/projects/{pid}/workflows` | 启动多 Agent 工作流（异步） |
 | GET | `/api/projects/{pid}/workflows` | 项目工作流运行列表 |
 | GET | `/api/workflows/{run_id}` | 工作流详情（阶段、审核轮次、执行、分析） |
@@ -243,7 +256,7 @@ AI 审核结论：
 
 ## 数据模型
 
-启动时由 SQLAlchemy `create_all` 自动建表（也提供 `migrations/mysql/001_init.sql`，共 20 张表），核心表：
+启动时由 SQLAlchemy `create_all` 自动建表（也提供 `migrations/mysql/001_init.sql`，共 21 张表），核心表：
 
 - `projects` / `code_analyses` / `state_machines`
 - `requirements`（需求版本）/ `test_points`（测试点）
@@ -251,6 +264,7 @@ AI 审核结论：
 - `execution_records` / `execution_steps` / `execution_requirements`（执行↔版本快照）
 - `execution_reviews` / `execution_review_images`（逐图分析）/ `execution_review_issues`（问题定位）
 - `workflow_runs` / `workflow_stages` / `workflow_cases` / `workflow_case_reviews` / `workflow_result_analyses`（多 Agent 工作流）
+- `llm_profiles`（文本/VLM 多套 LLM 配置）
 
 ## 验证
 
@@ -278,6 +292,8 @@ cd frontend && npm run build             # 前端构建
 - 单次批量 AI 审核上限 20 条，逐条串行调用，耗时随条数线性增长。
 - 多 Agent 工作流新增的测试默认使用离线 LLM 和假执行器；真实执行复用现有 Playwright 执行器，需要被测站点与 Chromium 已就绪。工作流不会自动重试目标不可达的执行阶段。
 - Pipeline 快速创建项目仍按本机源码路径登记；源码压缩包上传和 Git 自动拉取尚未实现。
+- 共享测试数据没有通用自动 reset；数量变化使用 `capture` 运行时基线，固定总数且无创建动作的用例会被拒绝/丢弃。
+- LLM API Key 保存在服务端 `.env` / 数据库，接口只返回掩码；请限制服务器与数据库访问权限。
 - 评估实验的 `cost` 为 `null`：`LlmClient` 未采集 token usage；只报告真实调用次数与耗时。
 - 工作流按单需求版本串行执行；同一需求顺序做基线与方案对比属于配对观察，不是独立随机样本。
 

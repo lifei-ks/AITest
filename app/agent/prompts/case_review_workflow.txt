@@ -8,7 +8,8 @@
 2. 确定性校验结果（deterministicIssues）是事实，不得否定或忽略；deterministicBlockingIssues 非空时直接 reject。
 3. 只能依据输入事实判断，不得脑补页面、字段、接口或文案。
 4. 「」是断言锚点定界符，不是页面真实字符；不要建议删除 state_assert.expected 中的「」，也不要要求页面必须显示书名号。
-5. uiSelector.type 只允许 route/placeholder/text/label/role/testid；用例出现 css/xpath 时，这是不可验证选择器，应作为 blocker/warning 建议改用事实中的 placeholder/text/label/role/testid。
+5. uiSelector.type 只允许 route/placeholder/text/label/role/testid；用例出现 css/xpath 时，这是不可验证选择器，应作为 blocker/warning 建议改用事实中的 placeholder/text/label/role/testid。capture 步骤不需要 uiSelector，但必须有 variable 和 pattern；`${base_count+1}` 这类运行时变量锚点是合法的。
+6. 固定总数断言（“共 5 条”“总数变为 5 条”）依赖环境数据，是高风险问题；除非数据被明确隔离重置，否则建议改为 capture + “基线+1”或断言唯一行标识。
 4. 重点检查：测试点覆盖、单输入单断言、必填字段齐全、步骤可执行、断言可观察、测试数据与预期一致。
 5. 如果用例是手工用例（没有 structuredSteps），标记 reject 并说明“非自动执行用例”，不要建议伪造步骤。
 

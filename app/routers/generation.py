@@ -21,11 +21,12 @@ class GenerateRequest(BaseModel):
     modules: list[str] | None = None
     types: list[str] | None = None
     max_cases: int | None = None
+    llmProfileId: str | None = None
 
 
 @router.post("/{pid}/generate")
 def generate(pid: str, req: GenerateRequest):
-    result = generation_service.generate(pid, req.mode)
+    result = generation_service.generate(pid, req.mode, profile_id=req.llmProfileId)
     return ok(result)
 
 

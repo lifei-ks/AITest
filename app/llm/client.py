@@ -26,6 +26,10 @@ class LlmClient:
     def available(self) -> bool:
         return bool(self.api_key)
 
+    def chat_text(self, messages: list[dict], max_tokens: int = 256) -> str:
+        """纯文本连通性/轻量调用；不要求 JSON，兼容只返回 reasoning_content 的推理模型。"""
+        return self._chat(messages, max_tokens, False)
+
     def chat_json(self, messages: list[dict], max_tokens: int = 8192, json_mode: bool = False):
         """发起一次对话并解析为 JSON（返回 dict 或 list）。失败抛 LlmUnavailable。
 

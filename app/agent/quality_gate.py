@@ -119,6 +119,12 @@ class UiLanguageLinter:
             sel = step.get("uiSelector") or {}
             if step.get("type") in ("ui_action", "input") and not sel.get("value"):
                 issues.append(f"缺少 uiSelector：{action}")
+            # capture 步骤必须声明变量和提取规则，否则执行器无法消费
+            if step.get("type") == "capture":
+                if not str(step.get("variable") or "").strip():
+                    issues.append(f"capture 缺少 variable：{action}")
+                if not str(step.get("pattern") or "").strip():
+                    issues.append(f"capture 缺少 pattern：{action}")
         for exp in case.expected_results:
             for w in VAGUE_ASSERT_WORDS:
                 if w in exp:
@@ -154,6 +160,7 @@ def _scenario_text(case) -> str:
     """
     steps = "".join(
         f"{s.get('action', '')}{s.get('target', '')}{s.get('inputValue', '')}{s.get('expected', '')}"
+        f"{s.get('variable', '')}{s.get('pattern', '')}"
         for s in case.structured_steps
     )
     return _normalize(f"{case.title}{steps}{'|'.join(case.expected_results)}")

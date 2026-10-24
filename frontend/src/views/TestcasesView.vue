@@ -237,6 +237,7 @@
                 <el-option label="点击" value="ui_action" />
                 <el-option label="输入" value="input" />
                 <el-option label="断言" value="state_assert" />
+                <el-option label="读取变量" value="capture" />
               </el-select>
               <el-input v-model="s.action" placeholder="动作（如 点击登录按钮）" size="small" class="grow" />
               <el-button link type="primary" :disabled="i === 0" @click="moveStep(i, -1)">上移</el-button>
@@ -251,6 +252,10 @@
               <el-input v-model="s.uiSelector.value" placeholder="定位值" size="small" style="width: 180px" />
               <el-input v-if="s.type === 'input'" v-model="s.inputValue" placeholder="输入值" size="small" style="width: 160px" />
               <el-input v-if="s.type === 'state_assert'" v-model="s.expected" placeholder="断言文本" size="small" style="width: 200px" />
+              <template v-if="s.type === 'capture'">
+                <el-input v-model="s.variable" placeholder="变量名，如 base_count" size="small" style="width: 160px" />
+                <el-input v-model="s.pattern" placeholder="提取正则，如 共\\s*(\\d+)\\s*条" size="small" style="width: 220px" />
+              </template>
             </div>
           </div>
           <el-button size="small" @click="addStep">+ 添加步骤</el-button>
@@ -595,6 +600,8 @@ function openEdit(row) {
   edit.structuredSteps = (copy.structuredSteps || []).map((s) => ({
     ...s,
     uiSelector: s.uiSelector || { type: 'text', value: '' },
+    variable: s.variable || '',
+    pattern: s.pattern || '',
   }))
   editVisible.value = true
 }
@@ -608,6 +615,8 @@ function addStep() {
     uiSelector: { type: 'text', value: '' },
     expected: '',
     inputValue: '',
+    variable: '',
+    pattern: '',
   })
 }
 
@@ -626,9 +635,16 @@ async function saveEdit() {
   if (!edit.title?.trim()) return ElMessage.warning('请填写用例标题')
   if (!edit.structuredSteps.length) return ElMessage.warning('结构化步骤不能为空')
   const invalid = edit.structuredSteps.find(
-    (s) => s.type !== 'state_assert' && !s.uiSelector?.value?.trim(),
+    (s) =>
+      s.type !== 'state_assert' &&
+      s.type !== 'capture' &&
+      !s.uiSelector?.value?.trim(),
   )
   if (invalid) return ElMessage.warning(`步骤 #${edit.structuredSteps.indexOf(invalid) + 1} 缺少定位值`)
+  const badCapture = edit.structuredSteps.find(
+    (s) => s.type === 'capture' && (!s.variable?.trim() || !s.pattern?.trim()),
+  )
+  if (badCapture) return ElMessage.warning(`步骤 #${edit.structuredSteps.indexOf(badCapture) + 1} 的读取变量缺少变量名或正则`)
 
   saving.value = true
   try {

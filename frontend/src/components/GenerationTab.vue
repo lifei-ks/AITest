@@ -31,6 +31,22 @@
           <el-radio-button value="rule">仅规则</el-radio-button>
         </el-radio-group>
 
+        <el-select
+          v-model="llmProfileId"
+          size="small"
+          style="width: 170px"
+          clearable
+          placeholder="默认文本 LLM"
+          :disabled="running || mode === 'rule'"
+        >
+          <el-option
+            v-for="p in textProfiles"
+            :key="p.id"
+            :label="`${p.name} · ${p.model}`"
+            :value="p.id"
+          />
+        </el-select>
+
         <el-button
           type="primary"
           :loading="running"
@@ -126,6 +142,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { generateRequirementStream, listRequirements, listTestPoints } from '../api/requirements'
+import { listLlmProfiles } from '../api/settings'
 
 const props = defineProps({
   projectId: { type: String, required: true },
@@ -142,6 +159,9 @@ const loading = ref(false)
 const pointsLoading = ref(false)
 const running = ref(false)
 const mode = ref('auto')
+const llmProfiles = ref([])
+const llmProfileId = ref(null)
+const textProfiles = computed(() => llmProfiles.value.filter((p) => p.kind === 'text' && p.enabled))
 const cases = ref([])
 const stat = ref(null)
 const progress = ref({ current: 0, total: 0, message: '' })
@@ -234,7 +254,11 @@ function start() {
   running.value = true
 
   try {
-    es = generateRequirementStream(props.requirementId, mode.value)
+    es = generateRequirementStream(
+      props.requirementId,
+      mode.value,
+      mode.value === 'rule' ? null : llmProfileId.value,
+    )
   } catch (e) {
     running.value = false
     ElMessage.error(e.message || '无法建立生成连接')
@@ -313,7 +337,20 @@ function typeLabel(t) {
   return { positive: '正例', negative: '反例', boundary: '边界', state: '流转' }[t] || t
 }
 
-onMounted(loadRequirements)
+async function loadLlmProfiles() {
+  try {
+    llmProfiles.value = await listLlmProfiles()
+    const defaultProfile = llmProfiles.value.find((p) => p.kind === 'text' && p.isDefault && p.enabled)
+    if (!llmProfileId.value && defaultProfile) llmProfileId.value = defaultProfile.id
+  } catch {
+    llmProfiles.value = []
+  }
+}
+
+onMounted(() => {
+  loadRequirements()
+  loadLlmProfiles()
+})
 onBeforeUnmount(close)
 </script>
 

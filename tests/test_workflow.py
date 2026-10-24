@@ -20,7 +20,9 @@ from app.entity.models import (
     ExecutionStep,
     Project,
     Requirement,
+    RequirementCase,
     TestCase,
+    WorkflowCase,
     WorkflowRun,
     WorkflowStage,
 )
@@ -300,7 +302,11 @@ def test_requirement_points_fall_back_when_llm_unavailable(analyzed_project, mon
         def chat_json(self, *args, **kwargs):
             raise LlmUnavailable("模拟非法 JSON / 超时")
 
-    monkeypatch.setattr(requirement_service, "LlmClient", lambda *a, **k: UnavailableClient())
+    monkeypatch.setattr(
+        requirement_service.settings_service,
+        "get_text_client",
+        lambda *a, **k: UnavailableClient(),
+    )
     with SessionLocal() as session:
         req = session.get(Requirement, rid)
         points = requirement_service.parse_points(session, req, "auto")
@@ -551,6 +557,62 @@ def test_invalid_ai_repair_keeps_deterministically_valid_case(analyzed_project, 
     assert any("已保留原用例" in note for note in notes)
 
 
+def test_review_converts_existing_fixed_count_to_runtime_baseline(analyzed_project, monkeypatch):
+    """复用旧用例时，审核阶段也应把固定总数改为 capture + 基线+1。"""
+    steps = [
+        {"order": 1, "type": "ui_action", "action": "打开新建订单页面", "target": "新建订单", "uiSelector": {"type": "route", "value": "/orders/create"}, "expected": "", "inputValue": ""},
+        {"order": 2, "type": "input", "action": "输入收货人", "target": "收货人", "uiSelector": {"type": "placeholder", "value": "请输入收货人"}, "expected": "", "inputValue": "张三"},
+        {"order": 3, "type": "input", "action": "输入手机号", "target": "手机号", "uiSelector": {"type": "placeholder", "value": "请输入手机号"}, "expected": "", "inputValue": "13800138000"},
+        {"order": 4, "type": "input", "action": "输入收货地址", "target": "收货地址", "uiSelector": {"type": "placeholder", "value": "请输入收货地址"}, "expected": "", "inputValue": "北京市朝阳区测试路1号"},
+        {"order": 5, "type": "input", "action": "输入订单金额", "target": "订单金额", "uiSelector": {"type": "placeholder", "value": "请输入订单金额"}, "expected": "", "inputValue": "100.00"},
+        {"order": 6, "type": "ui_action", "action": "点击提交", "target": "提交订单", "uiSelector": {"type": "text", "value": "提交订单"}, "expected": "", "inputValue": ""},
+        {"order": 7, "type": "state_assert", "action": "验证创建成功", "target": "", "uiSelector": {"type": "text", "value": "「订单创建成功」"}, "expected": "「订单创建成功」"},
+        {"order": 8, "type": "state_assert", "action": "验证列表总数", "target": "", "uiSelector": {"type": "text", "value": "「共 5 条订单」"}, "expected": "「共 5 条订单」"},
+    ]
+    with SessionLocal() as session:
+        req = Requirement(project_id=analyzed_project, name="固定总数", version=f"V{uuid.uuid4().hex[:4]}", content=PRD, status="ready")
+        session.add(req)
+        session.flush()
+        tc = TestCase(
+            id="TC-900001",
+            project_seq=900001,
+            project_id=analyzed_project,
+            title="新建订单后总数断言",
+            type="positive",
+            priority="P1",
+            preconditions=json.dumps([], ensure_ascii=False),
+            steps=json.dumps([s["action"] for s in steps], ensure_ascii=False),
+            expected_results=json.dumps(["「订单创建成功」，总数变为 5 条"], ensure_ascii=False),
+            structured_steps=json.dumps(steps, ensure_ascii=False),
+            test_data=json.dumps({"receiverName": "张三"}, ensure_ascii=False),
+            coverage_refs=json.dumps({}, ensure_ascii=False),
+            source="ai",
+            quality_score=100,
+        )
+        session.add(tc)
+        session.add(RequirementCase(requirement_id=req.id, test_case_id=tc.id))
+        run = WorkflowRun(project_id=analyzed_project, requirement_id=req.id, status="running", mode="rule")
+        session.add(run)
+        session.flush()
+        session.add(WorkflowCase(run_id=run.id, case_id=tc.id, position=1, automation_status="automated", review_status="pending"))
+        session.commit()
+        run_id = run.id
+        tc_id = tc.id
+
+    monkeypatch.setattr(workflow_service, "_text_client", _offline_client)
+    with SessionLocal() as session:
+        run = session.get(WorkflowRun, run_id)
+        result = workflow_service._stage_case_review(session, run, {"maxRevisions": 2, "reviewEnabled": True})
+    assert result["status"] == "completed"
+    with SessionLocal() as session:
+        updated = session.get(TestCase, tc_id)
+        updated_steps = json.loads(updated.structured_steps)
+    assert updated_steps[1]["type"] == "capture"
+    assert updated_steps[1]["variable"] == "base_count"
+    assert any("${base_count+1}" in (s.get("expected") or "") for s in updated_steps)
+    assert not any("共 5 条订单" in json.dumps(s, ensure_ascii=False) for s in updated_steps)
+
+
 def test_case_generation_failure_preserves_previous_stage(analyzed_project, monkeypatch):
     rid = _create_requirement(analyzed_project, "阶段失败")
     monkeypatch.setattr(workflow_service, "_text_client", _offline_client)
@@ -692,3 +754,53 @@ def test_workflow_api_and_report(analyzed_project, monkeypatch):
         project_report = client.get(f"/api/projects/{analyzed_project}/report?workflowRunId={run_id}")
         assert project_report.status_code == 200
         assert "多 Agent 测试工作流" in project_report.text
+
+
+def test_parse_points_uses_selected_text_profile(analyzed_project, monkeypatch):
+    rid = _create_requirement(analyzed_project, "选择测试点 LLM")
+    calls: list[str | None] = []
+
+    class Unavailable:
+        model = "offline"
+
+        def available(self):
+            return False
+
+    monkeypatch.setattr(
+        requirement_service.settings_service,
+        "get_text_client",
+        lambda profile_id=None: calls.append(profile_id) or Unavailable(),
+    )
+    with SessionLocal() as session:
+        req = session.get(Requirement, rid)
+        points = requirement_service.parse_points(session, req, "auto", profile_id="profile-points")
+    assert calls == ["profile-points"]
+    assert points and all(point["source"] == "rule" for point in points)
+
+
+def test_generate_uses_selected_text_profile(analyzed_project, monkeypatch):
+    rid = _create_requirement(analyzed_project, "选择用例 LLM")
+    with SessionLocal() as session:
+        req = session.get(Requirement, rid)
+        points = requirement_service.parse_points(session, req, "rule")
+        requirement_service.save_points(session, req, points)
+        session.commit()
+    calls: list[str | None] = []
+
+    class Unavailable:
+        model = "offline"
+
+        def available(self):
+            return False
+
+    monkeypatch.setattr(
+        generation_service.settings_service,
+        "get_text_client",
+        lambda profile_id=None: calls.append(profile_id) or Unavailable(),
+    )
+    result = generation_service.generate(
+        analyzed_project, "llm", requirement_id=rid, profile_id="profile-cases"
+    )
+    assert calls == ["profile-cases"]
+    assert result["kept"] > 0
+    assert result["mode"] == "rule"

@@ -34,6 +34,9 @@ class WorkflowCreate(BaseModel):
     reuseExistingCases: bool = True
     reanalyzePoints: bool = False
     targetUrl: str | None = None
+    # 测试点/用例可分别选择文本 LLM profile；为空使用默认文本 profile
+    testPointLlmProfileId: str | None = None
+    caseLlmProfileId: str | None = None
     # Pipeline：缺分析时自动跑静态分析；已有成功分析默认复用
     analyzeCode: bool = True
     reanalyzeCode: bool = False

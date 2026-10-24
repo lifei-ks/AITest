@@ -1,6 +1,6 @@
 -- AICase Core MySQL 初始化 DDL（由 scripts/gen_mysql_ddl.py 生成）
 -- 建库后执行：mysql -u root -p <库名> < migrations/mysql/001_init.sql
--- 共 20 张表
+-- 共 21 张表
 
 SET NAMES utf8mb4;
 
@@ -127,6 +127,22 @@ CREATE TABLE execution_steps (
 	PRIMARY KEY (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 CREATE INDEX ix_execution_steps_execution_id ON execution_steps (execution_id);
+
+
+CREATE TABLE llm_profiles (
+	id VARCHAR(36) NOT NULL, 
+	name VARCHAR(120) NOT NULL, 
+	kind VARCHAR(20) NOT NULL, 
+	api_key TEXT, 
+	base_url VARCHAR(500), 
+	model VARCHAR(120), 
+	enabled INTEGER NOT NULL, 
+	is_default INTEGER NOT NULL, 
+	created_at DATETIME NOT NULL, 
+	updated_at DATETIME NOT NULL, 
+	PRIMARY KEY (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE INDEX ix_llm_profiles_kind ON llm_profiles (kind, enabled);
 
 
 CREATE TABLE mindmaps (

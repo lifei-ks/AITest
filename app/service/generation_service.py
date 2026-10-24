@@ -8,6 +8,7 @@ import uuid
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.agent.count_assertion import normalize_case_counts
 from app.agent.quality_gate import (
     is_compound_expected,
     quoted_anchors,
@@ -32,7 +33,6 @@ from app.analyzer.models import (
     to_json_dict,
 )
 from app.common.execution_enums import case_status_meta
-from app.config import get_settings
 from app.entity.models import (
     CodeAnalysis,
     Project,
@@ -43,7 +43,8 @@ from app.entity.models import (
     TestCaseVersion,
     TestPoint,
 )
-from app.llm.client import LlmClient, LlmUnavailable
+from app.llm.client import LlmUnavailable
+from app.service import settings_service
 
 logger = logging.getLogger(__name__)
 
@@ -276,6 +277,7 @@ def generate(
     session: Session | None = None,
     on_event=None,
     requirement_id: str | None = None,
+    profile_id: str | None = None,
 ) -> dict:
     """执行生成，落库，返回统计。mode: rule / llm / auto（llm 不可用时降级 rule）。
 
@@ -316,7 +318,7 @@ def generate(
         actual_mode = "rule"
         if requirement is not None:
             cases = []
-            client = LlmClient(get_settings().llm_api_key, get_settings().llm_base_url, get_settings().llm_model)
+            client = settings_service.get_text_client(profile_id)
             if mode in ("llm", "auto") and client.available():
                 try:
                     # 先释放只读事务，避免长 LLM 调用期间 MySQL 连接空闲被关闭
@@ -336,7 +338,7 @@ def generate(
             # 项目级生成（向后兼容）
             cases = generate_rule_cases(backend, frontend, machines)
             if mode in ("llm", "auto"):
-                client = LlmClient(get_settings().llm_api_key, get_settings().llm_base_url, get_settings().llm_model)
+                client = settings_service.get_text_client(profile_id)
                 if client.available():
                     try:
                         session.commit()
@@ -348,6 +350,27 @@ def generate(
                         logger.warning("LLM 生成降级规则模式: %s", e)
 
         _enrich_coverage_refs(cases, backend, machines, points)
+        list_routes = [p.route for p in frontend.pages if p.route]
+        normalized_cases = []
+        for case in cases:
+            proxy = {
+                "structuredSteps": case.structured_steps,
+                "expectedResults": case.expected_results,
+                "steps": case.steps,
+                "preconditions": case.preconditions,
+            }
+            transformed = normalize_case_counts(proxy, list_routes)
+            if transformed.get("drop"):
+                logger.warning("跳过无法建立运行时基线的固定总数用例: %s", case.title)
+                continue
+            if transformed["changed"]:
+                case.structured_steps = proxy["structuredSteps"]
+                case.expected_results = proxy["expectedResults"]
+                case.steps = proxy["steps"]
+                case.preconditions = proxy["preconditions"]
+                logger.info("用例已把固定总数改为运行时基线: %s", case.title)
+            normalized_cases.append(case)
+        cases = normalized_cases
         gate = run_quality_gate(cases)
 
         if requirement is not None:
@@ -408,7 +431,7 @@ def generate(
             session.close()
 
 
-def generate_requirement(rid: str, mode: str = "auto", on_event=None) -> dict:
+def generate_requirement(rid: str, mode: str = "auto", on_event=None, profile_id: str | None = None) -> dict:
     """按需求版本生成用例：解析所属项目后复用 generate。"""
     from app.database import SessionLocal
 
@@ -419,7 +442,7 @@ def generate_requirement(rid: str, mode: str = "auto", on_event=None) -> dict:
 
             raise BizError(40406, f"需求版本不存在: {rid}", http_status=404)
         pid = req.project_id
-    return generate(pid, mode, on_event=on_event, requirement_id=rid)
+    return generate(pid, mode, on_event=on_event, requirement_id=rid, profile_id=profile_id)
 
 
 def _gen_llm(client, backend, frontend, machines) -> list:
@@ -466,7 +489,7 @@ def _normalize_steps(raw_steps) -> list[dict]:
         if not isinstance(s, dict):
             continue
         step_type = s.get("type")
-        if step_type not in ("ui_action", "input", "state_assert"):
+        if step_type not in ("ui_action", "input", "state_assert", "capture"):
             continue
         sel = s.get("uiSelector") if isinstance(s.get("uiSelector"), dict) else {}
         out.append(
@@ -481,6 +504,8 @@ def _normalize_steps(raw_steps) -> list[dict]:
                 },
                 "expected": str(s.get("expected") or "")[:500],
                 "inputValue": str(s.get("inputValue") or s.get("input_value") or "")[:500],
+                "variable": str(s.get("variable") or "")[:60],
+                "pattern": str(s.get("pattern") or "")[:300],
             }
         )
     return out

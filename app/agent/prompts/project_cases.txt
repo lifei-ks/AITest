@@ -7,5 +7,6 @@
 3. structuredSteps 每步 type 只允许 ui_action|input|state_assert；第一条 ui_action 必须是打开页面（type=route）
 4. state_assert 的 expected 必须用「」引号锚定页面可见文案
 5. 只生成 6 条最有代表性的用例（正例1/反例2/边界1/流转2），每条步骤精简（不超过 8 步）
+6. 禁止写死列表总数/“共 N 条”；数量变化必须 capture 当前值后用 ${base_count+1} 断言，或改断言唯一行标识
 
 输出要求：只输出 JSON 对象 {"testCases": [...]}，不要任何思考过程、解释文字、markdown 代码块或前后缀。

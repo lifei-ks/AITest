@@ -120,6 +120,26 @@ WorkflowRun.summary → workflow 报告 + 项目报告附加区块
   - 无证据时 `unknown` + 置信度 ≤ 0.3；
   - LLM 不可用/输出非法 → 规则兜底，`source=rule`。
 
+## 3.5 数据依赖与总数断言
+
+共享测试数据会让「共 5 条」「总数变为 5 条」这类固定聚合断言必然失真：执行前可能已有 7 条，执行后就是 8 条。
+
+处理策略（按优先级）：
+
+1. **数据隔离**：理想情况下每个用例自备数据或调用项目提供的 reset 接口；当前平台不假设被测系统有 reset 能力，因此不能只依赖固定种子。
+2. **运行时基线（已实现）**：新增 `capture` 步骤，在操作前读取当前总数；断言使用 `${base_count+1}`。执行器支持 `${var}`、`${var+1}`、`${var-1}`，变量缺失/非数字会明确失败，不会静默跳过。
+   ```json
+   {"type":"capture","action":"读取当前列表总数","target":"列表总数","uiSelector":{"type":"text","value":""},"expected":"","inputValue":"","variable":"base_count","pattern":"共\\s*(\\d+)\\s*条订单"}
+   ```
+   ```json
+   {"type":"state_assert","action":"校验总数增加 1","uiSelector":{"type":"text","value":"「共 ${base_count+1} 条订单」"},"expected":"「共 ${base_count+1} 条订单」"}
+   ```
+3. **唯一行标识**：创建类用例优先断言新订单的唯一收货人/订单号/状态，不依赖全局总数。
+4. **固定总数无基线 → 不执行**：没有创建动作或无法确定列表路由时，生成阶段丢弃该用例，审核阶段标 reject 并说明原因；不伪造通过。
+5. **自动改写**：生成和审核阶段都会检测「共/总数/数量 N 条」；对包含创建动作且能确定列表路由的用例，自动插入 `capture` 并把断言改写为「基线+1」。旧用例在 Pipeline 审核时也会生成新版本，不需要手工改步骤。
+
+边界：当前只处理单个、`+1` 的创建型总数断言；删除/过滤导致的 `-1`、金额等非计数聚合、多总数同时出现的情况不会自动改写，会进入审核/人工处理。
+
 ## 4. 编排器与状态
 
 - 文件：`app/service/workflow_service.py`
@@ -145,8 +165,9 @@ WorkflowRun.summary → workflow 报告 + 项目报告附加区块
 | `workflow_cases` | 本次运行的用例索引 | case_id、test_point_id、position、automation_status、review_status、revision_count、quality_score、first/final_review_id、execution_id、analysis_id |
 | `workflow_case_reviews` | 每一轮审核 | round、review_status、quality_score、issues、missing_coverage、suggestions、deterministic_issues、source、model |
 | `workflow_result_analyses` | Agent 4 结果 | execution_id、execution_status 快照、failure_category、reason、evidence、confidence、recommended_action、needs_human_review、source、model、raw_response |
+| `llm_profiles` | 多套 LLM 配置 | kind(text/vision)、name、api_key、base_url、model、enabled、is_default |
 
-所有 JSON 字段仍用 `Text` 存字符串；不修改已有表。MySQL DDL 已重新生成：`migrations/mysql/001_init.sql`（20 张表）。
+所有 JSON 字段仍用 `Text` 存字符串；不修改已有表。MySQL DDL 已重新生成：`migrations/mysql/001_init.sql`（21 张表，新增 `llm_profiles`）。
 
 ## 6. API
 
@@ -206,9 +227,19 @@ WorkflowRun.summary → workflow 报告 + 项目报告附加区块
 - 缺少成功代码分析时自动执行静态分析；已有成功分析默认复用，`reanalyzeCode=true` 可强制重跑
 - 页面每 2 秒轮询运行状态；可展开用例查看每轮审核问题、未覆盖场景、执行状态、分析证据和报告
 
-### 8.2 环境变量
+### 8.2 多 LLM 配置
 
-沿用现有 `.env`：
+设置页分「文本 LLM」「多模态 VLM」两组，每组可配置多条；测试点解析、用例生成、Pipeline 高级配置可分别选择文本 profile。
+
+- 首次读取设置时，把 `.env` 的单套文本/多模态配置迁移成默认 profile；之后以设置页/`llm_profiles` 为准
+- 未选择 profile 时使用同类默认 profile；没有可用 profile 时回退 `.env`
+- 截图审核使用默认 VLM profile；没有可用 VLM 时回退默认文本 profile
+- API 只返回掩码 Key；更新时传回掩码表示保留原 Key
+- 生成接口：`profileId`（测试点解析/用例生成）；Pipeline：`testPointLlmProfileId` / `caseLlmProfileId`
+
+### 8.3 环境变量
+
+沿用现有 `.env`（仅作为初始/兜底配置）：
 
 | 变量 | 作用 |
 |---|---|
@@ -217,7 +248,7 @@ WorkflowRun.summary → workflow 报告 + 项目报告附加区块
 | `TARGET_URL_DEFAULT` | 工作流未显式传 `targetUrl` 时的默认被测地址 |
 | `AITEST_PROMPT_DIR` | 可选，覆盖提示词目录 |
 
-### 8.3 命令行实验
+### 8.4 命令行实验
 
 ```bash
 # 实验 A：基线生成 vs 生成+审核（会改写生成用例，必须确认）
@@ -266,7 +297,7 @@ WorkflowRun.summary → workflow 报告 + 项目报告附加区块
 
 ```bash
 pytest -q
-# 100 passed, 1 warning（StarletteDeprecationWarning）
+# 111 passed, 1 warning（StarletteDeprecationWarning）
 
 cd frontend && npm run build
 # ✓ built（仅有既有 chunk >500kB 提示）
@@ -279,6 +310,8 @@ cd frontend && npm run build
 - 结果分析：无证据不冒充缺陷、模型无证据结论降级、locator 失败归为脚本问题
 - 离线 LLM 的完整闭环：阶段全部完成，审核通过用例被执行，分析不覆盖 `ExecutionRecord.status`
 - 无代码分析的项目：Pipeline 自动执行 `code_analysis`，再继续测试点/用例
+- 固定总数断言：自动改写为 capture + 基线+1；7 条基线执行后断言 8 条的真实浏览器验证通过
+- 无创建动作/无法定位列表的固定总数用例：不执行，明确记录原因
 - 修订上限：始终要求修订时最多 2 轮，最终 reject，执行/分析阶段 skipped
 - 阶段失败保留：测试点阶段 completed、用例生成 failed、后续 skipped、报告 completed
 - API：启动、轮询、详情、工作流报告、项目报告附加区块
@@ -308,6 +341,9 @@ cd frontend && npm run build
 - 单次运行只处理一个需求版本；`maxCases` 会截断生成结果，超出的用例不参与本次审核/执行。
 - 手工/导入用例只做确定性标记，不执行；生成但无结构化步骤的用例会 `reject/blocked`。
 - 审核修订会更新原用例（并生成 `test_case_versions` 版本）；执行历史仍保留执行瞬间快照，但其他运行引用同一用例时会看到最新版本。
+- 固定总数自动改写只覆盖“创建动作 + 单个计数 +1 + 能确定列表路由”的场景；删除/过滤、金额聚合、多个总数同时出现时不会自动改写，会进入审核或拒绝。
+- `capture` 从页面 body 文本按 pattern 提取，pattern 必须足够具体（如 `共\s*(\d+)\s*条订单`）；提取不到会明确失败，不会把变量当作 0 或跳过。没有数据隔离时，建议优先断言唯一行标识。
+- 共享数据环境没有通用的自动 reset；如果被测系统需要固定种子数量，应由项目提供数据准备/清理能力，平台不会假设 `/api/demo/reset` 之类接口存在。
 - 审核的 advisory 项（源码分析未采集到的按钮文案/锚点）不会单独阻塞执行，因为无法证明其错误；若需更严格，应完善静态分析或开启 LLM 审核。
 - 修订质量取决于 LLM；LLM 不可用时只能做确定性审核，`fixable` 问题会转 `reject` 而非执行。
 - 结果分析仍是启发式 + 可选 LLM；`product_defect` 永远要求人工复核，不替代缺陷管理流程。
@@ -327,10 +363,12 @@ cd frontend && npm run build
 - `app/agent/prompt_loader.py`：`{{VAR}}` 模板加载/热更新/缺变量报错
 - `app/agent/prompts/*.txt`：7 个外置提示词
 - `app/agent/test_point_agent.py`、`test_case_agent.py`、`result_analysis_agent.py`
+- `app/agent/count_assertion.py`：固定总数 → capture + 基线+1
 - `app/agent/case_review_agent.py`：提示词外置 + 工作流三态审核
 - `app/service/requirement_service.py`：`parse_points/save_points`，Agent 1 接入
 - `app/service/generation_service.py`：Agent 2 接入
 - `app/service/case_review_service.py`：可选注入 LLM 客户端；修复覆盖度映射的 ORM/dict 兼容修复
+- `app/service/settings_service.py`：多 LLM profile、.env 迁移、默认/连通性
 - `app/service/workflow_service.py`：7 阶段编排器（含自动代码分析）
 - `app/routers/workflows.py`：工作流 API
 - `app/service/report_service.py`：报告增加工作流区块
@@ -342,12 +380,13 @@ cd frontend && npm run build
 - `frontend/src/api/workflows.js`
 - `frontend/src/components/WorkflowTab.vue`（含 Pipeline 模式）
 - `frontend/src/views/PipelineView.vue`：独立 Pipeline 执行页面
+- `frontend/src/views/SettingsView.vue`：文本/VLM 多配置管理
 - `frontend/src/components/QuickStartDialog.vue`：快速创建项目 + 需求版本 + 上传 PRD
 - `frontend/src/App.vue`、`frontend/src/router/index.js`：侧边栏「Pipeline 执行」入口
 - `frontend/src/views/ProjectDetailView.vue`：移除原工作流 tab，统一走独立页面
 
 测试与脚本：
 
-- `tests/test_workflow.py`、`tests/test_evaluation.py`
+- `tests/test_workflow.py`、`tests/test_evaluation.py`、`tests/test_count_assertion.py`、`tests/test_llm_profiles.py`
 - `scripts/evaluate_workflow.py`、`scripts/evaluate_result_analysis.py`
 - `migrations/mysql/001_init.sql`（已包含新表）

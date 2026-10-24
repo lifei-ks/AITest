@@ -18,6 +18,9 @@ outputs/
 # Environment
 .env
 
+# 本地笔记
+question.txt
+
 # Node
 node_modules/
 frontend/dist/
@@ -40,4 +43,3 @@ Thumbs.db
 .codebuddy/
 .tmp*
 
-.question.txt

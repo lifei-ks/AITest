@@ -450,3 +450,27 @@ class WorkflowResultAnalysis(Base):
     model: Mapped[str | None] = mapped_column(String(100), nullable=True)
     raw_response: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+
+
+class LlmProfile(Base):
+    """可配置的多个 LLM 配置（文本 / 多模态各一组）。
+
+    - kind=text：需求测试点、用例生成、用例审核、结果分析
+    - kind=vision：执行截图审核
+    - api_key 仅服务端使用，接口只返回掩码；首个默认配置从 .env 迁移生成
+    """
+
+    __tablename__ = "llm_profiles"
+    __table_args__ = (Index("ix_llm_profiles_kind", "kind", "enabled"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    # text / vision
+    kind: Mapped[str] = mapped_column(String(20), nullable=False, default="text")
+    api_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    base_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    model: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    enabled: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    is_default: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)

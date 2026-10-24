@@ -23,7 +23,6 @@ from sqlalchemy.orm import Session
 
 from app.common.errors import BizError
 from app.common.timeutil import to_utc_iso
-from app.config import get_settings
 from app.database import SessionLocal
 from app.entity.models import (
     Project,
@@ -35,6 +34,7 @@ from app.entity.models import (
 )
 from app.agent import test_point_agent
 from app.llm.client import LlmClient, LlmUnavailable
+from app.service import settings_service
 from app.service.project_service import parse_prd_text
 
 logger = logging.getLogger(__name__)
@@ -589,7 +589,7 @@ def _extract_points_rule(req: Requirement, backend, frontend, machines) -> list[
 
 # ---------- 后台解析任务 ----------
 
-def parse_points(session: Session, req: Requirement, mode: str = "auto") -> list[dict]:
+def parse_points(session: Session, req: Requirement, mode: str = "auto", profile_id: str | None = None) -> list[dict]:
     """同步抽取测试点（工作流和后台任务共用）。
 
     保持原解析策略：LLM 优先，LLM 不可用/空结果时规则兜底；mode=rule 时只用规则。
@@ -597,7 +597,7 @@ def parse_points(session: Session, req: Requirement, mode: str = "auto") -> list
     backend, frontend, machines = _load_code_facts(session, req.project_id)
     points: list[dict] = []
     if mode in ("llm", "auto"):
-        client = LlmClient(get_settings().llm_api_key, get_settings().llm_base_url, get_settings().llm_model)
+        client = settings_service.get_text_client(profile_id)
         if client.available():
             try:
                 # LLM 可能耗时数十秒：先结束只读事务，避免 MySQL 空闲断开连接
@@ -638,7 +638,7 @@ def save_points(session: Session, req: Requirement, points: list[dict]) -> None:
     session.flush()
 
 
-def start_analysis(rid: str, mode: str = "auto") -> dict:
+def start_analysis(rid: str, mode: str = "auto", profile_id: str | None = None) -> dict:
     with SessionLocal() as session:
         req = _get_or_404(session, rid)
         if not (req.content or "").strip():
@@ -646,17 +646,17 @@ def start_analysis(rid: str, mode: str = "auto") -> dict:
         req.status = "analyzing"
         req.error_message = None
         session.commit()
-    threading.Thread(target=_run_analysis, args=(rid, mode), daemon=True).start()
+    threading.Thread(target=_run_analysis, args=(rid, mode, profile_id), daemon=True).start()
     return {"requirementId": rid, "status": "analyzing"}
 
 
-def _run_analysis(rid: str, mode: str) -> None:
+def _run_analysis(rid: str, mode: str, profile_id: str | None = None) -> None:
     session = SessionLocal()
     try:
         req = session.get(Requirement, rid)
         if req is None:
             return
-        points = parse_points(session, req, mode)
+        points = parse_points(session, req, mode, profile_id)
         save_points(session, req, points)
         session.commit()
         logger.info("需求测试点解析完成 requirement=%s points=%s", rid, len(points))

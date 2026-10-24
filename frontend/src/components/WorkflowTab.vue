@@ -42,6 +42,38 @@
               <el-option label="规则" value="rule" />
             </el-select>
           </el-form-item>
+          <el-form-item label="测试点 LLM">
+            <el-select
+              v-model="form.testPointLlmProfileId"
+              clearable
+              placeholder="默认文本 LLM"
+              style="width: 100%"
+              :disabled="starting || form.mode === 'rule'"
+            >
+              <el-option
+                v-for="p in textProfiles"
+                :key="p.id"
+                :label="`${p.name} · ${p.model}`"
+                :value="p.id"
+              />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="用例 LLM">
+            <el-select
+              v-model="form.caseLlmProfileId"
+              clearable
+              placeholder="默认文本 LLM"
+              style="width: 100%"
+              :disabled="starting || form.mode === 'rule'"
+            >
+              <el-option
+                v-for="p in textProfiles"
+                :key="p.id"
+                :label="`${p.name} · ${p.model}`"
+                :value="p.id"
+              />
+            </el-select>
+          </el-form-item>
           <el-form-item label="执行与审核">
             <el-switch v-model="form.autoExecute" active-text="执行通过用例" />
             <el-switch v-model="form.reviewEnabled" active-text="启用用例审核" class="switch-gap" />
@@ -238,7 +270,7 @@
 </template>
 
 <script setup>
-import { onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { listRequirements } from '../api/requirements'
 import {
@@ -247,6 +279,7 @@ import {
   listWorkflows,
   workflowReportUrl,
 } from '../api/workflows'
+import { listLlmProfiles } from '../api/settings'
 
 const props = defineProps({
   projectId: { type: String, required: true },
@@ -257,6 +290,8 @@ const props = defineProps({
 
 const PIPELINE_STEPS = ['代码分析', '测试点', '用例生成', '审核修订', '自动执行', '结果分析', '报告']
 const requirements = ref([])
+const llmProfiles = ref([])
+const textProfiles = computed(() => llmProfiles.value.filter((p) => p.kind === 'text' && p.enabled))
 const runs = ref([])
 const selectedRunId = ref('')
 const detail = ref(null)
@@ -276,11 +311,26 @@ const form = reactive({
   reviewEnabled: true,
   analyzeEnabled: true,
   analyzeCode: true,
+  testPointLlmProfileId: null,
+  caseLlmProfileId: null,
   reanalyzeCode: false,
   targetUrl: '',
 })
 
 let pollTimer = null
+
+async function loadLlmProfiles() {
+  try {
+    llmProfiles.value = await listLlmProfiles()
+    const defaultProfile = llmProfiles.value.find((p) => p.kind === 'text' && p.isDefault && p.enabled)
+    if (defaultProfile) {
+      if (!form.testPointLlmProfileId) form.testPointLlmProfileId = defaultProfile.id
+      if (!form.caseLlmProfileId) form.caseLlmProfileId = defaultProfile.id
+    }
+  } catch {
+    llmProfiles.value = []
+  }
+}
 
 async function loadRequirements() {
   try {
@@ -426,6 +476,7 @@ watch(
 )
 
 onMounted(async () => {
+  await loadLlmProfiles()
   await loadRequirements()
   await loadRuns()
 })

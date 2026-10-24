@@ -18,7 +18,33 @@ logger = logging.getLogger(__name__)
 
 # 引号锚点：中文角括号「」『』 / 弯引号 / 英文引号
 QUOTE_ANCHOR_RE = re.compile(r"[\u300c\u300e\u201c\u2018\"']([^\u300d\u300f\u201d\u2019\"']+)[\u300d\u300f\u201d\u2019\"']")
-REFRESH_RE = re.compile(r"刷新页面|刷新|reload", re.IGNORECASE)
+REFRESH_RE = re.compile(r"刷新页面|刷新浏览器|reload", re.IGNORECASE)
+# 运行时变量：${name} / ${name+1} / ${name-1}
+VARIABLE_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?:([+-])(\d+))?\}")
+VARIABLE_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _resolve_variables(value, variables: dict[str, str]) -> str:
+    """替换 ${var} 和简单整数加减；变量缺失或非数字时抛业务步骤错误，不静默跳过。"""
+    if not value or "${" not in str(value):
+        return value
+    text = str(value)
+
+    def _repl(match: re.Match) -> str:
+        name, op, delta = match.group(1), match.group(2), match.group(3)
+        if name not in variables:
+            raise _StepError("CASE_INVALID", f"运行时变量未捕获: {name}")
+        raw = variables[name]
+        if not op:
+            return str(raw)
+        try:
+            base = int(str(raw).strip())
+            number = int(delta)
+        except (TypeError, ValueError):
+            raise _StepError("CASE_INVALID", f"变量 {name}={raw!r} 不是整数，无法进行 {op}{delta}") from None
+        return str(base + number if op == "+" else base - number)
+
+    return VARIABLE_RE.sub(_repl, text)
 
 
 def _selector_for(step: dict) -> str | None:
@@ -145,6 +171,7 @@ def execute_case(case: dict, target_url: str, output_dir: str, mode: str = "prog
     total = len(steps)
     passed = 0
     step_results = []
+    variables: dict[str, str] = {}
     record = {
         "status": "passed", "errorCategory": None, "errorMessage": None,
         "videoPath": None, "passedSteps": 0, "totalSteps": total, "steps": step_results,
@@ -176,6 +203,7 @@ def execute_case(case: dict, target_url: str, output_dir: str, mode: str = "prog
                 error = None
                 reload_evidence = None
                 assertion_detail = None
+                capture_detail = None
                 try:
                     if stype == "ui_action" and (step.get("uiSelector") or {}).get("type") == "route":
                         route = step["uiSelector"]["value"]
@@ -201,7 +229,27 @@ def execute_case(case: dict, target_url: str, output_dir: str, mode: str = "prog
                         loc, attempted = _find_locator(page, step)
                         if not loc:
                             raise _StepError("SELECTOR_NOT_FOUND", f"输入框未找到，尝试链: {attempted}")
-                        loc.fill(step["inputValue"])
+                        loc.fill(_resolve_variables(step["inputValue"], variables))
+                    elif stype == "capture":
+                        variable = str(step.get("variable") or "").strip()
+                        pattern = str(step.get("pattern") or "").strip()
+                        if not variable or not VARIABLE_NAME_RE.match(variable):
+                            raise _StepError("CASE_INVALID", "capture 步骤缺少合法 variable")
+                        if not pattern:
+                            raise _StepError("CASE_INVALID", "capture 步骤缺少 pattern")
+                        try:
+                            regex = re.compile(pattern)
+                        except re.error as exc:
+                            raise _StepError("CASE_INVALID", f"capture pattern 非法: {exc}") from exc
+                        match = regex.search(page.inner_text("body"))
+                        if not match:
+                            raise _StepError(
+                                "ASSERT_FAILED",
+                                f"未能从页面捕获变量 {variable}，pattern={pattern}",
+                            )
+                        captured = match.group(1) if regex.groups else match.group(0)
+                        variables[variable] = str(captured)
+                        capture_detail = f"capture {variable}={captured}"
                     elif stype == "state_assert":
                         if REFRESH_RE.search(
                             f"{step.get('action') or ''} {step.get('expected') or ''}"
@@ -209,7 +257,8 @@ def execute_case(case: dict, target_url: str, output_dir: str, mode: str = "prog
                             reload_evidence = _reload_and_verify(page)
                         # 等页面跳转/渲染稳定（如提交后 500ms 跳转列表页）
                         page.wait_for_timeout(800)
-                        ok_, status, detail = _do_assert(page, step.get("expected") or "")
+                        resolved_expected = _resolve_variables(step.get("expected") or "", variables)
+                        ok_, status, detail = _do_assert(page, resolved_expected)
                         result = status
                         if status == "passed":
                             assertion_detail = detail
@@ -252,6 +301,8 @@ def execute_case(case: dict, target_url: str, output_dir: str, mode: str = "prog
                     selector_for_record = f"browser.reload; navigationType={reload_evidence['navigationType']}"
                 elif stype == "state_assert" and assertion_detail:
                     action_for_record = f"{action_for_record}（断言证据：{assertion_detail}）"
+                elif stype == "capture" and capture_detail:
+                    action_for_record = f"{action_for_record}（变量证据：{capture_detail}）"
 
                 if result == "passed":
                     passed += 1

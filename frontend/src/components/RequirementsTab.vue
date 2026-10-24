@@ -47,6 +47,23 @@
                   <el-option label="规则" value="rule" />
                 </el-select>
               </el-tooltip>
+              <el-tooltip content="选择本次解析测试点使用的文本 LLM；留空使用默认配置" placement="top">
+                <el-select
+                  v-model="llmProfileId"
+                  size="small"
+                  style="width: 170px"
+                  clearable
+                  placeholder="默认文本 LLM"
+                  :disabled="analyzing || analyzeMode === 'rule'"
+                >
+                  <el-option
+                    v-for="p in textProfiles"
+                    :key="p.id"
+                    :label="`${p.name} · ${p.model}`"
+                    :value="p.id"
+                  />
+                </el-select>
+              </el-tooltip>
               <el-button
                 size="small"
                 type="primary"
@@ -180,6 +197,7 @@ import {
   updateRequirement,
   uploadRequirementPrd,
 } from '../api/requirements'
+import { listLlmProfiles } from '../api/settings'
 import PrdDropUpload from './PrdDropUpload.vue'
 
 const props = defineProps({
@@ -207,6 +225,9 @@ const uploading = ref(false)
 const prdDropRef = ref()
 const analyzing = ref(false)
 const analyzeMode = ref('auto')
+const llmProfiles = ref([])
+const llmProfileId = ref(null)
+const textProfiles = computed(() => llmProfiles.value.filter((p) => p.kind === 'text' && p.enabled))
 
 const dialogVisible = ref(false)
 const dialogMode = ref('create')
@@ -432,7 +453,11 @@ async function analyze() {
   if (!prd.value.trim()) return ElMessage.warning('请先填写或上传需求文档')
   analyzing.value = true
   try {
-    await analyzeRequirement(selectedId.value, analyzeMode.value)
+    await analyzeRequirement(
+      selectedId.value,
+      analyzeMode.value,
+      analyzeMode.value === 'rule' ? null : llmProfileId.value,
+    )
     const idx = requirements.value.findIndex((r) => r.id === selectedId.value)
     if (idx >= 0) requirements.value[idx] = { ...requirements.value[idx], status: 'analyzing', statusText: '解析中' }
     ElMessage.info('已开始解析，完成后自动刷新')
@@ -457,7 +482,20 @@ async function onUpload(file) {
   }
 }
 
-onMounted(loadList)
+async function loadLlmProfiles() {
+  try {
+    llmProfiles.value = await listLlmProfiles()
+    const defaultProfile = llmProfiles.value.find((p) => p.kind === 'text' && p.isDefault && p.enabled)
+    if (!llmProfileId.value && defaultProfile) llmProfileId.value = defaultProfile.id
+  } catch {
+    llmProfiles.value = []
+  }
+}
+
+onMounted(() => {
+  loadList()
+  loadLlmProfiles()
+})
 onBeforeUnmount(stopPoll)
 </script>
 

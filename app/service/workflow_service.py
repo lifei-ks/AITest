@@ -25,6 +25,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.agent import case_review_agent, result_analysis_agent
+from app.agent.count_assertion import normalize_case_counts
 from app.agent.quality_gate import (
     case_has_compound_expected,
     case_has_multiple_inputs,
@@ -33,7 +34,6 @@ from app.agent.quality_gate import (
 from app.common.errors import BizError
 from app.common.execution_enums import execution_status_meta
 from app.common.timeutil import to_utc_iso
-from app.config import get_settings
 from app.database import SessionLocal
 from app.entity.models import (
     CodeAnalysis,
@@ -58,6 +58,8 @@ from app.service import (
     execution_service,
     generation_service,
     requirement_service,
+    settings_service,
+    testcase_service,
 )
 from app.workflow.schemas import CaseReviewResult, ResultAnalysisResult, WorkflowCreate
 
@@ -112,9 +114,8 @@ def _elapsed_ms(start: datetime | None) -> int:
         return max(0, int((now - start).total_seconds() * 1000))
 
 
-def _text_client() -> LlmClient:
-    settings = get_settings()
-    return LlmClient(settings.llm_api_key, settings.llm_base_url, settings.llm_model)
+def _text_client(profile_id: str | None = None) -> LlmClient:
+    return settings_service.get_text_client(profile_id)
 
 
 # ---------- 序列化 ----------
@@ -651,7 +652,9 @@ def _stage_test_points(session: Session, run: WorkflowRun, config: dict) -> dict
         _end_stage(session, stage, "skipped", f"复用已有测试点 {len(existing)} 条", summary)
         return {"status": "skipped", **summary}
 
-    points = requirement_service.parse_points(session, req, config.get("mode", "auto"))
+    points = requirement_service.parse_points(
+        session, req, config.get("mode", "auto"), profile_id=config.get("testPointLlmProfileId")
+    )
     if not points:
         _end_stage(session, stage, "failed", "没有解析出任何测试点", {"testPointCount": 0}, "需求文档无法解析出可执行测试点")
         return {"status": "failed", "testPointCount": 0}
@@ -675,7 +678,11 @@ def _stage_test_points(session: Session, run: WorkflowRun, config: dict) -> dict
         "completed",
         f"生成 {len(points)} 条测试点（{', '.join(f'{k}:{v}' for k, v in by_source.items())}）",
         payload,
-        model=_text_client().model if "llm" in by_source else None,
+        model=(
+            settings_service.get_text_client(config.get("testPointLlmProfileId")).model
+            if "llm" in by_source
+            else None
+        ),
     )
     return {"status": "completed", **payload}
 
@@ -743,6 +750,7 @@ def _stage_case_generation(session: Session, run: WorkflowRun, config: dict) -> 
             config.get("mode", "auto"),
             session=session,
             requirement_id=req.id,
+            profile_id=config.get("caseLlmProfileId"),
         )
         pairs = _cases_for_requirement(session, run.project_id, req.id)[:max_cases]
         payload.update(
@@ -804,7 +812,11 @@ def _stage_case_generation(session: Session, run: WorkflowRun, config: dict) -> 
             status,
             f"生成并保留 {len(pairs)} 条用例（丢弃 {payload.get('dropped', 0)} 条）",
             payload,
-            model=_text_client().model if generation and generation.get("mode") == "llm" else None,
+            model=(
+                settings_service.get_text_client(config.get("caseLlmProfileId")).model
+                if generation and generation.get("mode") == "llm"
+                else None
+            ),
         )
     return {"status": status, **payload}
 
@@ -1117,9 +1129,69 @@ def _stage_case_review(session: Session, run: WorkflowRun, config: dict) -> dict
             round_no = 0
             repair_error = ""
             fallback_pass = False
+            count_dropped = False
+            count_notes: list[str] = []
+            list_routes = [
+                str(page.get("route") or "")
+                for page in (frontend_dict.get("pages") or [])
+                if page.get("route")
+            ]
             while True:
                 round_no += 1
                 case = generation_service.case_to_dict(tc)
+                transformed = normalize_case_counts(case, list_routes)
+                if transformed.get("drop"):
+                    note = "；".join(transformed.get("notes") or [])
+                    _record_review(
+                        session,
+                        run,
+                        wc,
+                        1,
+                        "reject",
+                        0,
+                        [
+                            {
+                                "severity": "blocker",
+                                "field": "expectedResults",
+                                "problem": note or "固定总数断言无法转换为运行时基线",
+                                "suggestion": "改用唯一行标识断言，或在隔离数据环境中单独验证总数",
+                                "evidence": "工作流数据稳定性校验",
+                            }
+                        ],
+                        [],
+                        [note] if note else [],
+                        [note] if note else [],
+                        "deterministic",
+                        "",
+                    )
+                    wc.automation_status = "blocked"
+                    counts["reject"] += 1
+                    count_dropped = True
+                    session.commit()
+                    break
+                if transformed["changed"]:
+                    try:
+                        tc = testcase_service.update_testcase(
+                            session,
+                            wc.case_id,
+                            {
+                                "structured_steps": case["structuredSteps"],
+                                "expected_results": case["expectedResults"],
+                                "steps": case["steps"],
+                                "preconditions": case["preconditions"],
+                            },
+                            change_note="固定总数断言改为运行时基线",
+                        )
+                        session.commit()
+                        case = generation_service.case_to_dict(tc)
+                        count_notes = transformed["notes"]
+                    except Exception as exc:  # noqa: BLE001 - 改写失败保留原用例，由审核处理
+                        logger.warning("用例 %s 固定总数改运行时基线失败: %s", wc.case_id, exc)
+                        session.rollback()
+                        tc = session.get(TestCase, wc.case_id)
+                        if tc is None:
+                            break
+                        case = generation_service.case_to_dict(tc)
                 case["requirement"] = facts.get("requirement") or {}
                 case["testPoint"] = facts.get("testPoint") or {}
                 deterministic = _deterministic_review(
@@ -1168,7 +1240,8 @@ def _stage_case_review(session: Session, run: WorkflowRun, config: dict) -> dict
                 score = max(0, deterministic["qualityScore"] - _llm_deduction(llm_issues))
                 if deterministic["blocking"]:
                     score = min(score, 30)
-                suggestions = list((llm_review or {}).get("suggestions") or [])
+                suggestions = list(count_notes)
+                suggestions.extend((llm_review or {}).get("suggestions") or [])
                 if llm_note:
                     suggestions.append(llm_note)
                 source = "mixed" if llm_review else "deterministic"
@@ -1259,6 +1332,9 @@ def _stage_case_review(session: Session, run: WorkflowRun, config: dict) -> dict
 
             wc.revision_count = revisions
             counts["revisions"] += revisions
+            if count_dropped:
+                session.commit()
+                continue
             if not fallback_pass and wc.review_status == "revise":
                 round_no += 1
                 reason = repair_error or (

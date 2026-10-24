@@ -38,6 +38,7 @@ class RequirementPayload(BaseModel):
 
 class GeneratePayload(BaseModel):
     mode: str = "auto"
+    llmProfileId: str | None = None
 
 
 @router.get("/api/projects/{pid}/requirements")
@@ -77,8 +78,8 @@ async def upload_prd(rid: str, file: UploadFile = File(...), session: Session = 
 
 
 @router.post("/api/requirements/{rid}/analyze", status_code=202)
-def analyze(rid: str, mode: str = Query("auto", pattern="^(rule|llm|auto)$")):
-    return ok(requirement_service.start_analysis(rid, mode))
+def analyze(rid: str, mode: str = Query("auto", pattern="^(rule|llm|auto)$"), profileId: str | None = Query(None)):
+    return ok(requirement_service.start_analysis(rid, mode, profileId))
 
 
 @router.get("/api/requirements/{rid}/test-points")
@@ -88,11 +89,11 @@ def list_points(rid: str, session: Session = Depends(get_session)):
 
 @router.post("/api/requirements/{rid}/generate")
 def generate(rid: str, payload: GeneratePayload):
-    return ok(generation_service.generate_requirement(rid, payload.mode))
+    return ok(generation_service.generate_requirement(rid, payload.mode, profile_id=payload.llmProfileId))
 
 
 @router.get("/api/requirements/{rid}/generate/stream")
-async def generate_stream(rid: str, mode: str = Query("auto", pattern="^(rule|llm|auto)$")):
+async def generate_stream(rid: str, mode: str = Query("auto", pattern="^(rule|llm|auto)$"), profileId: str | None = Query(None)):
     """按需求版本流式生成：started / progress / case / complete / error。"""
     q: queue_mod.Queue = queue_mod.Queue()
 
@@ -101,7 +102,7 @@ async def generate_stream(rid: str, mode: str = Query("auto", pattern="^(rule|ll
 
     def run():
         try:
-            generation_service.generate_requirement(rid, mode, on_event=on_event)
+            generation_service.generate_requirement(rid, mode, on_event=on_event, profile_id=profileId)
             q.put({"type": "__end__"})
         except Exception as exc:  # noqa: BLE001 - SSE 需兜底转 error 事件
             q.put({"type": "error", "message": str(exc)})

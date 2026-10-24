@@ -13,6 +13,7 @@ from pathlib import Path
 
 from app.config import get_settings
 from app.llm.client import LlmClient, LlmUnavailable
+from app.service import settings_service
 
 logger = logging.getLogger(__name__)
 
@@ -35,14 +36,12 @@ def _effective_vision_config() -> tuple[str, str, str]:
 
 
 def vision_enabled() -> bool:
-    """只要有多模态模型（或回退后的文本模型）+ Key 就启用截图审核。"""
-    key, _base, model = _effective_vision_config()
-    return bool((model or "").strip() and key)
+    """默认 VLM profile 可用即启用；无 VLM 时沿用文本 profile 回退。"""
+    return _vision_client().available()
 
 
 def _vision_client() -> LlmClient:
-    key, base, model = _effective_vision_config()
-    return LlmClient(key, base, model)
+    return settings_service.get_vision_client()
 
 
 def _pick_images(steps: list[dict], max_images: int = MAX_IMAGES) -> list[dict]:

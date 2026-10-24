@@ -9,9 +9,9 @@ from sqlalchemy.orm import Session
 from app.agent import case_review_agent
 from app.analyzer.models import to_json_dict
 from app.common.errors import BizError
-from app.config import get_settings
 from app.entity.models import Project, Requirement, RequirementCase, TestCase, TestPoint
 from app.llm.client import LlmClient, LlmUnavailable
+from app.service import settings_service
 from app.service.coverage_service import resolve_coverage_refs
 from app.service.generation_service import case_to_dict, get_generation_context
 
@@ -88,8 +88,7 @@ def review_cases(session: Session, pid: str, case_ids: list[str]) -> dict:
     if len(ids) > MAX_REVIEW_CASES:
         raise BizError(40025, f"单次最多质检 {MAX_REVIEW_CASES} 条用例")
 
-    settings = get_settings()
-    client = LlmClient(settings.llm_api_key, settings.llm_base_url, settings.llm_model)
+    client = settings_service.get_text_client()
     facts_cache: dict[str, tuple] = {}
 
     results = []
@@ -142,7 +141,7 @@ def _normalize_steps(raw) -> list[dict]:
         if not isinstance(item, dict):
             continue
         step_type = str(item.get("type") or "").strip()
-        if step_type not in ("ui_action", "input", "state_assert"):
+        if step_type not in ("ui_action", "input", "state_assert", "capture"):
             continue
         selector = item.get("uiSelector") if isinstance(item.get("uiSelector"), dict) else {}
         steps.append({
@@ -156,6 +155,8 @@ def _normalize_steps(raw) -> list[dict]:
             },
             "expected": _clean_str(item.get("expected"), 500),
             "inputValue": _clean_str(item.get("inputValue"), 500),
+            "variable": _clean_str(item.get("variable"), 60),
+            "pattern": _clean_str(item.get("pattern"), 300),
         })
     if not steps:
         raise BizError(40026, "AI 修复没有产生有效的结构化步骤")
@@ -260,22 +261,35 @@ def _validate_case(case: dict, frontend: dict, requirement_text: str, point: Tes
         selector = step.get("uiSelector") or {}
         selector_type = selector.get("type")
         selector_value = str(selector.get("value") or "").strip()
-        if step_type not in ("ui_action", "input", "state_assert"):
+        if step_type not in ("ui_action", "input", "state_assert", "capture"):
             errors.append(f"步骤 {index} 类型非法: {step_type}")
             continue
         if step_type in ("ui_action", "input") and not selector_value:
             errors.append(f"步骤 {index} 缺少 uiSelector.value")
         if step_type == "input" and not str(step.get("inputValue") or "").strip():
             errors.append(f"步骤 {index} 缺少 inputValue")
+        if step_type == "capture":
+            variable = str(step.get("variable") or "").strip()
+            pattern = str(step.get("pattern") or "").strip()
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", variable or ""):
+                errors.append(f"步骤 {index} capture 缺少合法 variable")
+            if not pattern:
+                errors.append(f"步骤 {index} capture 缺少 pattern")
+            else:
+                try:
+                    compiled = re.compile(pattern)
+                    if compiled.groups < 1:
+                        errors.append(f"步骤 {index} capture pattern 必须包含捕获组")
+                except re.error as exc:
+                    errors.append(f"步骤 {index} capture pattern 非法: {exc}")
         if step_type == "state_assert":
             expected = str(step.get("expected") or "").strip()
             if not expected:
                 errors.append(f"步骤 {index} 缺少断言 expected")
             anchors.extend(ANCHOR_RE.findall(expected))
 
-        # state_assert 由执行器消费 expected 中的「」锚点，uiSelector 不参与断言定位；
-        # 对它的 selector 做源码事实校验只会产生假问题。
-        if step_type != "state_assert":
+        # state_assert 由期望锚点断言；capture 由 body 文本 + pattern 提取，不依赖 uiSelector。
+        if step_type not in ("state_assert", "capture"):
             if selector_type == "route" and selector_value and selector_value not in page_routes:
                 errors.append(f"步骤 {index} 路由不存在: {selector_value}")
             if selector_type == "placeholder" and selector_value not in placeholders:
@@ -298,6 +312,9 @@ def _validate_case(case: dict, frontend: dict, requirement_text: str, point: Tes
     if not anchors:
         errors.append("没有可观察的「」文案锚点")
     for anchor in step_anchors or anchors:
+        # 运行时变量锚点（如「共 ${base_count+1} 条订单」）无法在源码事实中静态匹配
+        if "${" in anchor:
+            continue
         if anchor not in text_corpus:
             errors.append(f"断言锚点不在源码/需求事实中: {anchor}")
 
@@ -336,8 +353,7 @@ def repair_case(
             })
 
     if client is None:
-        settings = get_settings()
-        client = LlmClient(settings.llm_api_key, settings.llm_base_url, settings.llm_model)
+        client = settings_service.get_text_client()
     if not client.available():
         raise BizError(40022, "未配置 LLM_API_KEY，无法进行 AI 修复")
     # 修复可能持续数十秒；先释放只读事务连接，避免 MySQL 空闲超时后写回失败

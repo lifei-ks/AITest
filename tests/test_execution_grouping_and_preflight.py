@@ -146,6 +146,7 @@ def test_refresh_step_detection():
     assert _refresh_requested({"type": "ui_action", "action": "刷新页面"})
     assert _refresh_requested({"type": "ui_action", "target": "reload"})
     assert not _refresh_requested({"type": "ui_action", "action": "点击支付"})
+    assert not _refresh_requested({"type": "state_assert", "action": "校验跳转后列表总数刷新"})
 
 
 def test_reload_evidence_uses_navigation_timing():

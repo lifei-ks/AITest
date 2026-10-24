@@ -152,6 +152,37 @@ def test_validate_case_ignores_state_assert_selector_value():
     assert _validate_case(case, frontend, "", None) == []
 
 
+def test_validate_case_accepts_capture_and_dynamic_anchor():
+    frontend = {
+        "pages": [{"route": "/orders/list", "forms": [{"fields": []}]}],
+        "selectors": [{"type": "text", "value": "提交订单"}],
+        "uiTexts": ["订单创建成功"],
+    }
+    case = {
+        "expectedResults": ["「订单创建成功」"],
+        "structuredSteps": [
+            {"type": "ui_action", "uiSelector": {"type": "route", "value": "/orders/list"}},
+            {
+                "type": "capture",
+                "action": "读取当前总数",
+                "target": "总数",
+                "uiSelector": {"type": "text", "value": "共"},
+                "expected": "",
+                "inputValue": "",
+                "variable": "base_count",
+                "pattern": r"共\s*(\d+)\s*条订单",
+            },
+            {
+                "type": "state_assert",
+                "action": "校验总数增加",
+                "uiSelector": {"type": "text", "value": "「共 ${base_count+1} 条订单」"},
+                "expected": "「共 ${base_count+1} 条订单」",
+            },
+        ],
+    }
+    assert _validate_case(case, frontend, "", None) == []
+
+
 def test_normalize_patch_rejects_invalid_type():
     with pytest.raises(Exception):
         _normalize_patch({"type": "api_call"})

@@ -13,12 +13,21 @@ export const uploadRequirementPrd = (rid, file) => {
 }
 
 // 需求文档 → 测试点（LLM 优先，rule 兜底），后台任务
-export const analyzeRequirement = (rid, mode = 'auto') =>
-  request.post(`/requirements/${rid}/analyze`, null, { params: { mode } })
+export const analyzeRequirement = (rid, mode = 'auto', profileId = null) =>
+  request.post(`/requirements/${rid}/analyze`, null, {
+    params: { mode, ...(profileId ? { profileId } : {}) },
+  })
 export const listTestPoints = (rid) => request.get(`/requirements/${rid}/test-points`)
 
 // 按需求版本生成用例（支持流式）
-export const generateRequirementCases = (rid, mode = 'auto') =>
-  request.post(`/requirements/${rid}/generate`, { mode }, { timeout: 600000 })
-export const generateRequirementStream = (rid, mode = 'auto') =>
-  new EventSource(`/api/requirements/${rid}/generate/stream?mode=${mode}`)
+export const generateRequirementCases = (rid, mode = 'auto', profileId = null) =>
+  request.post(
+    `/requirements/${rid}/generate`,
+    { mode, llmProfileId: profileId || null },
+    { timeout: 600000 },
+  )
+export const generateRequirementStream = (rid, mode = 'auto', profileId = null) => {
+  const query = new URLSearchParams({ mode })
+  if (profileId) query.set('profileId', profileId)
+  return new EventSource(`/api/requirements/${rid}/generate/stream?${query.toString()}`)
+}
