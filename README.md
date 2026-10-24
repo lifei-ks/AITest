@@ -1,317 +1,451 @@
 # AICase Core
 
-**基于「被测系统事实 + 需求文档」的测试用例自动生成与真实浏览器自动执行平台。**
+<p align="center">
+  <strong>把源码事实和需求文档，变成可执行的浏览器测试。</strong><br/>
+  Source-aware test generation · Multi-agent review · Evidence-based execution
+</p>
 
-输入一个 Spring Boot + Vue 项目的源码和本期需求文档，自动产出：结构化测试点、可直接执行的测试用例（带具体参数）、真机执行证据（逐步截图 + 录屏）、AI 截图审核报告、覆盖矩阵、HTML 报告与脑图。
+<p align="center">
+  <img alt="Python" src="https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white" />
+  <img alt="FastAPI" src="https://img.shields.io/badge/FastAPI-0.115%2B-009688?logo=fastapi&logoColor=white" />
+  <img alt="Vue" src="https://img.shields.io/badge/Vue-3-42B883?logo=vuedotjs&logoColor=white" />
+  <img alt="Playwright" src="https://img.shields.io/badge/Playwright-Chromium-2EAD33?logo=playwright&logoColor=white" />
+  <img alt="Tests" src="https://img.shields.io/badge/tests-138%20passed-brightgreen" />
+</p>
 
-> 需求版本（V1.0 / V2.0 …）贯穿全链路：不同期需求文档对应不同测试用例，支持按版本筛选、隔离、回看历史。
+<p align="center">
+  <a href="#核心能力">核心能力</a> ·
+  <a href="#架构">架构</a> ·
+  <a href="#快速开始">快速开始</a> ·
+  <a href="#配置">配置</a> ·
+  <a href="#使用">使用</a> ·
+  <a href="#api">API</a> ·
+  <a href="#设计原则">设计原则</a>
+</p>
+
+---
+
+## 这是什么
+
+AICase Core 是一个面向 Web 应用的 AI 测试平台：输入一个本地 Spring Boot + Vue 项目路径和一期需求文档，平台会自动完成测试点设计、可执行用例生成、独立审核、真实浏览器执行、截图审核、结果分析与报告输出。
+
+它解决的不是“让模型写几条测试用例”，而是测试落地过程中更难的几件事：
+
+- **用例要能跑**：生成结果必须落到真实路由、字段、placeholder 和按钮文案上，而不是看起来合理的自然语言。
+- **结果要有证据**：每次执行都有逐步截图、录屏、步骤状态和错误信息，不靠一句“测试通过”。
+- **版本要能隔离**：需求会变、模型会换、规则/LLM 会交替使用；每次生成都必须是一个可回看的独立版本。
+- **失败要可解释**：区分产品缺陷、脚本问题、数据问题、环境问题和证据不足，而不是把所有失败都归为“用例失败”。
+
+平台默认面向 Java Spring Boot + Vue 3，执行层使用 Playwright Chromium，LLM 是可选的增强能力，不配置也能以纯规则模式完整运行。
+
+---
 
 ## 核心能力
 
-### 1. 代码静态分析（纯规则）
-- 后端：接口端点、实体字段、`@NotBlank/@Size/@Pattern` 约束、枚举、业务规则
-- 前端：页面与路由、表单字段、placeholder/选择器、UI 文案
-- 状态机：从状态枚举 + 业务方法推断状态流转（带 `verified` 证据标记）
+### 01 · 源码感知的测试设计
 
-### 2. 需求版本管理
-- 一期需求 = 一个版本（`V1.0 / V2.0 …`），支持新建、编辑、上传 PRD（txt/md/docx/pdf）
-- 修改需求内容会作废旧测试点，等待重新解析
+静态分析提取后端接口、实体字段、校验约束、枚举、业务规则，以及前端页面、路由、表单、placeholder、UI 文案和可定位选择器。这些事实会注入测试点与用例生成，降低模型编造页面元素和输入字段的概率。
 
-### 3. 测试点抽取（LLM 优先，规则兜底）
-- LLM 阅读「本期需求文档 + 代码事实」，抽取最多 20 个测试点（主流程/校验/边界/状态/权限）
-- 测试点带分类、优先级、页面路由、涉及字段、预期结果，并自动关联代码中的真实路由与字段
-- 无 Key / LLM 失败时自动降级规则模式
-- 已实测：对演示订单需求一次抽取 18 个测试点，全部 `source=llm`（置信度 0.95），路由/接口/字段均为被测系统真实值
+### 02 · 可执行的结构化用例
 
-### 4. 用例生成（按测试点，带具体参数）
-- LLM 按测试点小批量生成（每批 5 条），要求回填真实路由/placeholder/按钮文案/具体输入值，禁止编造不存在的元素
-- 某批失败只对该批降级规则，不影响整体；规则模式按正例/反例/边界/流转四类补足
-- 强制用例首步为页面导航，保证可被执行器消费
-- 三道质量闸：Lint 拦截、100 分制打分、相似度去重
-- 已实测：按版本一次生成 18 条用例（质量闸 0 拦截），13 条 LLM 产出（置信度 0.85、质量分 100，选择器与测试数据均为真实值），5 条因批次失败按设计自动降级规则
+用例不是一段描述，而是可被执行器消费的结构化步骤：
 
-### 5. 自动执行（Playwright）
-- 结构化步骤 `ui_action / input / state_assert`
-- 五级定位兜底（选择器 → 文本 → 全页 → XPath）+ 三层断言（URL → 文案锚点 → 诚实 skipped）
-- 逐步截图 + WebM 录屏，失败即停并记录原因
+```json
+{
+  "type": "input",
+  "action": "输入收货人",
+  "target": "收货人",
+  "uiSelector": { "type": "placeholder", "value": "请输入收货人" },
+  "inputValue": "张三"
+}
+```
 
-### 6. AI 截图审核（多模态 LLM）
-- 执行完成后自动取 6 张关键截图交给多模态模型审核
-- 输出：结论 + 置信度 + 逐图分析 + 问题区域坐标（红框标注）
-- `ok` 且无技术错误 → 自动通过；`suspect / unavailable` → 待复核
-- 支持人工通过/判失败、单条/批量重新审核
-- 多模态模型可复用文本 LLM，也可单独配置
+生成阶段强制首步导航、单输入单主断言、必填字段补齐，并经过复合场景拦截、UI 语言检查、质量评分和相似度去重。
 
-### 7. 用例管理与版本隔离
-- 列表筛选（含需求版本）、编辑、版本历史/回滚、批量删除、复制、CSV 导入导出
-- 用例通过 `requirement_cases` 与版本映射；删除版本只删其自动生成的用例，手工用例保留
-- 用例列表、脑图、执行结果均支持按需求版本区分
+### 03 · 多 Agent 审核与修订
 
-### 8. 覆盖矩阵 / 报告 / 脑图
-- 覆盖矩阵：规划 vs 执行（接口 / 状态流转 / 业务规则）
-- HTML 报告（含截图）、XMind / Markdown 脑图导出
+测试点生成、用例生成、独立审核、结果分析拆成 4 个逻辑角色。审核采用“确定性校验 + LLM 建议”：
 
-### 9. 多 Agent 工作流 / Pipeline 一键执行
-- 独立侧边栏「Pipeline 执行」：选项目 + 需求版本，一键完成「代码分析 → 测试点 → 用例 → 审核/修订 → 执行 → 结果分析 → 报告」
-- 支持在 Pipeline 页面快速创建项目、创建需求版本并上传 PRD（.md/.txt/.pdf/.docx），创建后自动选中该需求
-- 缺少代码分析时自动执行静态分析；已有成功分析时默认复用，可强制重新分析
-- 4 个逻辑角色：测试点生成、可执行用例生成、独立用例审核/修订、证据驱动结果分析
-- 审核使用「确定性校验 + LLM 建议」：复合场景/多输入/缺必填字段会被拦截；不通过不执行，超过修订上限转 `reject`，不静默丢弃
-- 结果分析只写自己的分析表，**绝不覆盖真实执行状态**；证据不足一律 `unknown` 并交人工复核
-- 数量断言不再写死：固定「共 N 条」会自动改写为 `capture` 基线 + `${base_count+1}`；无法建立基线的固定总数用例不执行
-- 不接入工作流时，原有需求解析/生成/执行接口行为不变
-- 详细设计、API、实验方法与限制见 [docs/MULTI_AGENT_WORKFLOW.md](docs/MULTI_AGENT_WORKFLOW.md)
+- 确定性规则负责可执行性、事实一致性、复合场景和多输入；
+- LLM 负责语义建议、覆盖缺口和修订补丁；
+- 只有 `pass` 且 `automated` 的用例才进入 Pipeline 执行；
+- 修订最多 2 轮，超过上限转 `reject`，不静默丢弃。
 
-### 10. 多 LLM 配置
-- 设置页分「文本 LLM」和「多模态 VLM」两组，每组可配置多条，独立保存名称、API Key、Base URL、模型
-- 测试点解析、用例生成可分别选择文本 LLM；Pipeline 高级配置里可分别选择测试点 LLM 和用例 LLM
-- VLM 用于执行截图审核；没有可用 VLM 时回退默认文本 LLM
-- 首次读取设置时会把 `.env` 的单套文本/多模态配置迁移成默认 profile；之后以设置页配置为准
-- API 只返回掩码 Key；更新时回传掩码表示保留原 Key
+### 04 · 真实浏览器执行与证据链
+
+Playwright 逐步执行用例，支持多级定位兜底、URL/文案/状态断言、截图、WebM 录屏和步骤级错误记录。执行状态由真实结果落库，失败不会伪造通过。
+
+### 05 · 截图审核与证据驱动分析
+
+可选多模态 LLM 对关键截图进行复核，输出结论、置信度、逐图问题和红框坐标。结果分析 Agent 读取执行状态、步骤、错误码、截图审核结论和用例预期，输出失败分类与建议；它只写自己的分析表，**绝不覆盖真实执行状态**。
+
+### 06 · 生成版本隔离
+
+每次成功生成都会保存独立快照。实时用例只保留最新一次，历史版本按时间倒序回看、只读对比；规则生成和 LLM 生成不会混在同一个列表里。旧数据首次查看时自动归档为「历史归档」，不把多次生成伪装成一次。
+
+### 07 · 多 LLM 与模型适配
+
+文本 LLM 与多模态 VLM 分开配置，可维护多套 profile，并按测试点/用例生成分别选择。客户端兼容不同模型的响应差异：
+
+- `content` 为空时接受 `reasoning_content` 中的合法 JSON；
+- GLM-5.3 / 5.2 自动降低推理强度，避免思考过程吃满 token；
+- `finish_reason=length` 时提升 token 预算重试；
+- 供应商不支持扩展参数时自动去掉重试；
+- 只有重试后仍无可用结果才降级规则。
+
+### 08 · 一键 Pipeline
+
+独立侧边栏「Pipeline 执行」从代码分析一路跑到执行报告：
+
+```
+代码分析 → 测试点 → 用例生成 → 审核/修订 → 自动执行 → 结果分析 → 报告
+```
+
+支持快速创建项目、上传需求文档、选择测试点 LLM 和用例 LLM；缺少代码分析时自动补跑。
+
+---
 
 ## 架构
 
+```mermaid
+flowchart LR
+  subgraph Input["输入"]
+    R[需求版本 / PRD]
+    S[源码目录]
+  end
+
+  subgraph Deterministic["确定性内核"]
+    A[静态分析]
+    Q[质量闸]
+    X[Playwright 执行器]
+  end
+
+  subgraph Agents["LLM Agents"]
+    T[测试点生成]
+    G[用例生成]
+    V[独立审核 / 修订]
+    D[结果分析]
+  end
+
+  R --> T
+  S --> A
+  A -->|代码事实| T
+  A -->|代码事实| G
+  T --> G
+  G --> Q
+  Q --> V
+  V -->|pass + automated| X
+  X -->|截图 / 录屏 / 步骤| D
+  D --> P[报告 / 覆盖矩阵 / 脑图]
 ```
-需求文档(本期) ──┐
-                 ├─► 测试点(LLM 优先/规则兜底) ──► 用例(按测试点,LLM+规则)
-代码源码 ──静态分析──┘                                          │
-                 ┌──────────────────────────────────────────────┤
-                 ▼                                              ▼
-        结构化事实(端点/字段/约束/状态机/表单/选择器)       质量闸 → 落库(按版本隔离)
-                                                                 │
-                                           自动执行(Playwright)  │
-                                                                 ▼
-                                        逐步截图 + 录屏 ──► 多模态 AI 审核
-                                                                 │
-                                         通过 / 待复核(红框定位+逐图报告)
-```
 
-**确定性 / 不确定性分流**：
-- 静态分析、状态机提取、质量闸、覆盖率统计、执行器 = **纯规则**（可复现、可审计）
-- 需求→测试点、事实→用例参数、截图语义判断 = **LLM**（可选，可降级/摘除）
+**确定性 / 不确定性分流**
 
-**多 Agent 工作流 / Pipeline**
+| 层 | 职责 | 特性 |
+|---|---|---|
+| 确定性内核 | 静态分析、状态机、质量闸、数量改写、执行器、覆盖统计 | 可复现、可审计、无模型依赖 |
+| LLM Agents | 测试点、用例参数、审核建议、截图语义、结果分析 | 可选、可降级、输出必须经过结构校验 |
 
-```
-需求版本 ─► 代码分析(缺则自动) ─► Agent1 测试点 ─► Agent2 用例 ─► Agent3 独立审核/修订(≤2轮)
-                                                                    │
-                                                          仅 pass + automated
-                                                                    ▼
-                                                    现有 Playwright 执行器（截图/录屏/步骤）
-                                                                    ▼
-                                                    Agent4 证据驱动结果分析（不改执行状态）
-                                                                    ▼
-                                                        workflow 报告 + 项目报告附加区块
-```
+平台不会让模型直接决定“执行是否通过”。执行状态来自真实浏览器结果，模型只能解释证据。
 
-## 技术栈
-
-- 后端：FastAPI · SQLAlchemy 2.0 · Pydantic v2 · SQLite/MySQL · Jinja2
-- 前端：Vue 3 · Element Plus · Pinia · Vue Router · ECharts
-- 执行：Playwright（Chromium）
-- LLM：OpenAI 兼容协议（`/chat/completions`），支持 JSON mode 与多模态图片输入
+---
 
 ## 快速开始
 
-> 环境：Python 3.11+、Node.js 18+
+### 环境要求
+
+- Python 3.11+（当前环境 Python 3.14）
+- Node.js 18+
+- SQLite（默认）或 MySQL 8+
+- Playwright Chromium（执行用例时需要）
+
+### 1. 安装
 
 ```bash
-# 0. 安装依赖
+git clone <repository-url> AICase
+cd AICase
+
 python -m venv .venv
-.venv/Scripts/activate          # Linux/macOS: source .venv/bin/activate
+
+# Windows
+.venv\Scripts\activate
+# Linux / macOS
+# source .venv/bin/activate
+
 pip install -r requirements.txt
 playwright install chromium
 
 cd frontend
 npm install
 cd ..
-
-# 1. 配置环境变量
-cp .env.example .env            # 按需填写 DATABASE_URL / LLM_*
-
-# 2. 启动后端（自动建表；--reload 让后端代码改动后自动生效）
-.venv/Scripts/python -m uvicorn app.main:app --port 8100 --reload --reload-dir app
-
-# 3. 启动前端（默认代理到 8100）
-cd frontend && npm run dev
-# 打开 http://127.0.0.1:5173
-
-# 4. 演示靶站（自动执行需要）
-.venv/Scripts/python scripts/demo_site/serve.py   # 端口 8200
 ```
 
-## 配置（`.env`）
+### 2. 配置
+
+```bash
+# Windows
+copy .env.example .env
+# Linux / macOS
+# cp .env.example .env
+```
+
+最小可运行配置只需要数据库；不配置 LLM 时，测试点与用例走纯规则模式。
+
+```dotenv
+DATABASE_URL=sqlite:///./data/aicase.db
+OUTPUT_DIR=./outputs
+TARGET_URL_DEFAULT=http://127.0.0.1:8200
+```
+
+### 3. 启动
+
+```bash
+# 后端（Windows；Linux/macOS 用 .venv/bin/python）
+.venv/Scripts/python.exe -m uvicorn app.main:app \
+  --host 127.0.0.1 --port 8100 --reload --reload-dir app
+
+# 前端
+cd frontend
+npm run dev
+```
+
+- Web UI：<http://127.0.0.1:5173>
+- API 文档：<http://127.0.0.1:8100/docs>
+- 健康检查：<http://127.0.0.1:8100/api/health>
+
+Windows 也可以直接运行：
+
+```powershell
+powershell -File scripts/dev.ps1
+```
+
+### 4. 准备被测站点
+
+| 靶站 | 端口 | 启动方式 |
+|---|---|---|
+| 静态演示站（默认目标） | 8200 | `.venv/Scripts/python.exe scripts/demo_site/serve.py` |
+| 完整订单系统（Spring Boot + Vue） | 8080 / 5273 | 见 [`scripts/order-system/README.md`](scripts/order-system/README.md) |
+
+使用完整订单系统时，把项目「被测地址」设为 `http://127.0.0.1:5273`。
+
+---
+
+## 配置
 
 | 变量 | 说明 | 默认 |
 |---|---|---|
-| `DATABASE_URL` | SQLite 或 MySQL 连接串 | `sqlite:///./data/aicase.db` |
-| `OUTPUT_DIR` | 截图/录屏/报告输出目录 | `./outputs` |
+| `DATABASE_URL` | SQLite / MySQL 连接串 | 项目根目录下 `data/aicase.db` |
+| `OUTPUT_DIR` | 截图、录屏、报告输出目录 | `./outputs` |
 | `TARGET_URL_DEFAULT` | 被测站点默认地址 | `http://127.0.0.1:8200` |
-| `LLM_API_KEY` / `LLM_BASE_URL` / `LLM_MODEL` | 文本 LLM 初始配置；首次读取设置时迁移为默认 profile | 空 = 纯规则模式 |
-| `LLM_VISION_API_KEY` / `LLM_VISION_BASE_URL` / `LLM_VISION_MODEL` | 多模态初始配置；留空自动复用默认文本 profile | 空 |
+| `LLM_API_KEY` / `LLM_BASE_URL` / `LLM_MODEL` | 文本 LLM 初始配置 | 空 = 纯规则 |
+| `LLM_VISION_API_KEY` / `LLM_VISION_BASE_URL` / `LLM_VISION_MODEL` | 多模态 VLM 初始配置 | 空 = 回退文本 LLM |
+| `AITEST_PROMPT_DIR` | 外置提示词目录覆盖 | `app/agent/prompts` |
+| `VITE_BACKEND_TARGET` | 前端开发代理的后端地址 | `http://127.0.0.1:8100` |
 
-## 使用流程
+首次读取设置时，`.env` 中的单套 LLM 配置会迁移成数据库默认 profile；之后以「设置」页维护的多套配置为准。
 
+### MySQL
+
+```sql
+CREATE DATABASE aicase DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
 ```
-1. 项目列表 → 新建项目（源码路径 / 被测地址）
-2. 进入项目 → 触发代码分析
-3. 「需求版本」→ 新建 V1.0，填写/上传本期需求文档 → 解析测试点
-4. 「用例生成」→ 选版本 → 生成用例（自动/LLM/规则）
-5. 「设置」→ 文本 LLM / VLM 可分别配置多条，并选择默认
-6. 「测试用例」→ 执行单条/批量
-7. 「执行结果」→ 查看截图、录屏、AI 审核报告；待复核的人工处理；同一用例多次执行时点「历史」进入独立页面查看全部记录
-8. 侧边栏「Pipeline 执行」→ 可快速创建项目并上传需求文档 → 选需求版本 → 一键完成代码分析、测试点、用例、审核/修订、执行、结果分析、报告
-9. 「脑图」/「下载 HTML 报告」按需导出
-```
-
-## 目录结构
-
-```
-app/              后端（routers/service/analyzer/agent/llm/entity/common/dto/evaluation/workflow）
-app/agent/prompts/ 外置提示词（测试点/用例/审核/修复/结果分析，{{VAR}} 占位符）
-frontend/         Vue 3 前端
-scripts/          demo_site(演示靶站) / sample_src(样本源码) / e2e.py / analyze_cli.py / gen_mysql_ddl.py / evaluate_*.py
-tests/            后端测试
-migrations/mysql/ MySQL DDL（由 scripts/gen_mysql_ddl.py 生成）
-docs/             任务书 / 计划 / 迭代记录 / 多 Agent 工作流设计
-main.py           便捷入口
-```
-
-## 关键接口
-
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| GET/POST | `/api/projects` | 项目列表 / 新建 |
-| POST | `/api/projects/{pid}/analyze` | 触发代码分析 |
-| GET/POST | `/api/projects/{pid}/requirements` | 需求版本列表 / 新建 |
-| POST | `/api/requirements/{rid}/analyze` | 解析测试点（auto/llm/rule） |
-| POST | `/api/requirements/{rid}/generate` | 按版本生成用例 |
-| GET | `/api/requirements/{rid}/generate/stream` | SSE 流式生成 |
-| GET | `/api/projects/{pid}/testcases?requirementId=` | 用例列表（按版本过滤） |
-| POST | `/api/projects/{pid}/testcases/{cid}/execute` | 执行单条用例 |
-| POST | `/api/projects/{pid}/testcases/batch-execute` | 批量执行 |
-| GET | `/api/projects/{pid}/executions?requirementId=` | 执行结果（默认按用例去重并展示最新一次） |
-| GET | `/api/projects/{pid}/testcases/{cid}/executions` | 单个用例的执行历史 |
-| POST | `/api/executions/{eid}/llm-review` | 单条 AI 审核 |
-| POST | `/api/executions/batch-llm-review` | 批量 AI 审核 |
-| POST | `/api/executions/{eid}/review` | 人工复核（pass/fail） |
-| GET | `/api/meta/execution` | 执行状态、AI 结论和错误分类的完整枚举说明 |
-| GET/POST | `/api/settings/llm-profiles` | 多 LLM 配置列表 / 新增 |
-| PUT/DELETE | `/api/settings/llm-profiles/{id}` | 修改 / 删除配置 |
-| POST | `/api/settings/llm-profiles/{id}/default` | 设为同类默认配置 |
-| POST | `/api/settings/llm-profiles/{id}/test` | 测试该配置连通性 |
-| POST | `/api/projects/{pid}/workflows` | 启动多 Agent 工作流（异步） |
-| GET | `/api/projects/{pid}/workflows` | 项目工作流运行列表 |
-| GET | `/api/workflows/{run_id}` | 工作流详情（阶段、审核轮次、执行、分析） |
-| GET | `/api/workflows/{run_id}/report` | 工作流 HTML 报告 |
-| GET | `/api/projects/{pid}/report?workflowRunId=` | 项目报告附带指定工作流汇总 |
-| POST | `/api/projects/{pid}/testcases/ai-review` | 用例生成后的 AI 质检，输出问题与需求/源码依据 |
-| POST | `/api/projects/{pid}/testcases/ai-fix` | 基于质检问题生成修复补丁，校验通过后落版本 |
-| GET | `/api/projects/{pid}/mindmap/preview?requirementId=` | 脑图预览 |
-| GET | `/api/projects/{pid}/coverage/matrix?requirementId=` | 规划/执行覆盖矩阵 |
-| GET | `/api/projects/{pid}/report?requirementId=` | HTML 报告 |
-
-## 覆盖矩阵口径
-
-- **规划覆盖**：用例 `coverageRefs` 中实际引用到当前代码事实的接口、已验证状态转换和业务规则。
-- **执行覆盖**：只统计执行记录 `status=passed` 的用例，并优先读取执行瞬间的用例快照，避免后来编辑用例导致历史覆盖漂移。
-- 失败、跳过、待复核、执行中和已取消均不计入执行覆盖。
-- 覆盖矩阵支持 `requirementId` 参数，页面选择需求版本时只统计该版本用例。
-- 完整结构可通过 `GET /api/meta/execution` 查看。
-
-## 执行状态、AI 审核与错误分类
-
-用例执行状态：
-
-| 值 | 含义 |
-|---|---|
-| `not_run` | 尚未执行 |
-| `running` | 正在真实浏览器中执行 |
-| `passed` | 确定性检查全部通过，或证据经 AI/人工复核确认符合预期 |
-| `failed` | 出现确定错误，或人工复核确认不符合预期 |
-| `skipped` | 存在无法验证的步骤，缺少充分证据 |
-| `needs_review` | 证据不足、AI 判断有疑点或审核不可用，需要人工确认 |
-| `cancelled` | 执行被中止，不能视为通过 |
-
-AI 审核结论：
-
-| 值 | 含义 |
-|---|---|
-| `ok` | 截图和步骤证据支持预期；不能覆盖确定性的执行失败 |
-| `suspect` | 截图异常、与预期不符，或证据不足以证明预期 |
-| `unavailable` | 模型未配置、调用失败、响应非法或没有可用截图 |
-
-自动执行错误分类：
-
-| 值 | 含义 |
-|---|---|
-| `SELECTOR_NOT_FOUND` | 元素未找到，记录尝试过的选择器链 |
-| `ASSERT_FAILED` | URL 或引号锚定文案断言不通过 |
-| `NAVIGATION_FAILED` | 页面打不开或返回 4xx/5xx |
-| `TIMEOUT` | 页面操作或等待超过默认超时 |
-| `CASE_INVALID` | 用例缺结构化步骤、输入值等必需字段 |
-| `ENV_ERROR` | 浏览器启动、驱动或其他环境问题 |
-
-确定性执行失败不会被 AI 的 `ok` 改判为通过；AI 审核只能确认无确定失败的结果，或把不确定结果升级为 `needs_review`。
-
-## 数据模型
-
-启动时由 SQLAlchemy `create_all` 自动建表（也提供 `migrations/mysql/001_init.sql`，共 23 张表），核心表：
-
-- `projects` / `code_analyses` / `state_machines`
-- `requirements`（需求版本）/ `test_points`（测试点）
-- `test_cases` / `test_case_versions` / `requirement_cases`（版本↔用例映射）
-- `execution_records` / `execution_steps` / `execution_requirements`（执行↔版本快照）
-- `execution_reviews` / `execution_review_images`（逐图分析）/ `execution_review_issues`（问题定位）
-- `workflow_runs` / `workflow_stages` / `workflow_cases` / `workflow_case_reviews` / `workflow_result_analyses`（多 Agent 工作流）
-- `llm_profiles`（文本/VLM 多套 LLM 配置）
-- `id_sequences`（跨进程 TC 编号与项目内序号序列）
-- `case_generations`（每次用例生成的版本快照）
-
-## 验证
 
 ```bash
-pytest                                   # 后端全量测试（临时库）
-cd frontend && npm run build             # 前端构建
-.venv/Scripts/python scripts/e2e.py      # 端到端自检
-.venv/Scripts/python scripts/analyze_cli.py <源码路径>   # 命令行静态分析
-.venv/Scripts/python -m pytest -q tests/test_workflow.py tests/test_evaluation.py  # 工作流与评测
+mysql -u root -p aicase < migrations/mysql/001_init.sql
 ```
 
-实验脚本（会改写生成用例，需 `--allow-write`）：
+```dotenv
+DATABASE_URL=mysql+pymysql://user:password@127.0.0.1:3306/aicase?charset=utf8mb4
+```
+
+DDL 当前包含 23 张表。SQLite 会在后端启动时自动建表；MySQL 建议使用 DDL 初始化，并保持字符串列排序规则一致。
+
+---
+
+## 使用
+
+1. **新建项目**：填写本机源码路径和被测地址。
+2. **代码分析**：提取接口、字段、约束、页面、路由与状态机。
+3. **需求版本**：新建 `V1.0`，填写或上传 PRD，解析测试点。
+4. **生成用例**：选择需求版本、生成模式和 LLM，按测试点生成。
+5. **审核与执行**：AI 质检、单条/批量执行，查看截图、录屏和步骤证据。
+6. **Pipeline**：一键跑完分析 → 测试点 → 用例 → 审核 → 执行 → 分析 → 报告。
+7. **导出**：覆盖矩阵、HTML 报告、XMind / Markdown 脑图、CSV。
+
+### 页面
+
+| 路由 | 页面 |
+|---|---|
+| `/dashboard` | 总览看板 |
+| `/projects` | 项目列表 |
+| `/projects/:id` | 项目详情（代码分析 / 需求版本 / 用例生成 / 测试用例 / 脑图 / 执行结果） |
+| `/pipeline` | Pipeline 一键执行 |
+| `/testcases` | 全局用例列表 |
+| `/executions` | 全局执行结果 |
+| `/settings` | 多 LLM 配置 |
+
+用例页面支持按需求版本和生成版本切换。历史版本只读；执行、编辑和 AI 质检需要切回实时用例。
+
+---
+
+## API
+
+基础地址：`http://127.0.0.1:8100`。所有接口使用统一信封：
+
+```json
+{ "code": 0, "message": "ok", "data": {} }
+```
+
+完整 OpenAPI 见 `/docs`。
 
 ```bash
-.venv/Scripts/python scripts/evaluate_workflow.py --project-id <pid> --requirement-id <rid> --mode rule --allow-write
-.venv/Scripts/python scripts/evaluate_result_analysis.py --samples labels.jsonl --mode rule
+# 健康检查
+curl http://127.0.0.1:8100/api/health
+
+# 创建一次 Pipeline 运行
+curl -X POST http://127.0.0.1:8100/api/projects/<pid>/workflows \
+  -H "Content-Type: application/json" \
+  -d '{
+    "requirementId": "<rid>",
+    "mode": "auto",
+    "autoExecute": true,
+    "maxRevisions": 2,
+    "maxCases": 20
+  }'
 ```
 
-## 已知边界（诚实声明）
+| 分组 | 代表接口 |
+|---|---|
+| 项目 | `GET/POST /api/projects`、`GET/PUT/DELETE /api/projects/{pid}` |
+| 分析 | `POST /api/projects/{pid}/analyze`、`GET /api/projects/{pid}/analysis` |
+| 需求 | `GET/POST /api/projects/{pid}/requirements`、`POST /api/requirements/{rid}/analyze` |
+| 测试点 | `GET /api/requirements/{rid}/test-points` |
+| 生成 | `POST /api/requirements/{rid}/generate`、`GET /api/requirements/{rid}/generate/stream` |
+| 版本 | `GET /api/requirements/{rid}/generations`、`GET /api/requirements/{rid}/generations/{gid}` |
+| 用例 | `GET/POST /api/projects/{pid}/testcases`、`POST .../ai-review`、`POST .../ai-fix` |
+| 执行 | `POST /api/projects/{pid}/testcases/{cid}/execute`、`GET /api/executions/{eid}` |
+| 工作流 | `POST/GET /api/projects/{pid}/workflows`、`GET /api/workflows/{run_id}` |
+| 报告 | `GET /api/projects/{pid}/report`、`GET /api/projects/{pid}/coverage/matrix` |
+| 设置 | `GET/POST /api/settings/llm-profiles`、`POST .../test`、`POST .../default` |
 
-- 静态分析基于启发式正则，覆盖常见写法，非语法级精确解析。
-- LLM 生成的截图问题红框坐标为模型估算，存在偏移；后端已做裁剪/校验，不会越界。
-- 执行依赖被测站点已在 `target_url` 运行、且本机已安装 Playwright Chromium。
-- 项目分析当前支持 `local_path`，Git 仓库拉取未实现。
-- 单次批量 AI 审核上限 20 条，逐条串行调用，耗时随条数线性增长。
-- 多 Agent 工作流新增的测试默认使用离线 LLM 和假执行器；真实执行复用现有 Playwright 执行器，需要被测站点与 Chromium 已就绪。工作流不会自动重试目标不可达的执行阶段。
-- Pipeline 快速创建项目仍按本机源码路径登记；源码压缩包上传和 Git 自动拉取尚未实现。
-- 共享测试数据没有通用自动 reset；数量变化使用 `capture` 运行时基线，固定总数且无创建动作的用例会被拒绝/丢弃。
-- LLM API Key 保存在服务端 `.env` / 数据库，接口只返回掩码；请限制服务器与数据库访问权限。
-- 推理模型由客户端自动适配：GLM-5.3/5.2 自动降 `reasoning_effort=low`；content 为空时接受 reasoning_content 中的合法 JSON；`finish_reason=length` 时提升 token 预算重试一次。只有仍拿不到最终答案才规则兜底。
-- LLM 返回的 `expectedResults` 若是单个字符串会整体保留，不会逐字符拆分；历史逐字符脏数据在读取时自动归一化，已有用例可用 `scripts/fix_expected_results.py` 修复。
-- 测试点生成会过滤“展示 N 个字段/默认 N 条数据”这类静态页面结构测试点，字段存在性由用例事实和运行时断言覆盖。
-- 用例生成使用 SSE：页面显示逐批进度、逐条用例和来源（LLM/规则）；LLM 降级时页面明确提示规则兜底原因。
-- 每次生成保存版本快照；生成页和测试用例页都始终显示版本下拉，提供「实时用例（未归档）」和按时间倒序的生成快照。改造前已有的实时用例首次查看时自动归档为「历史归档」版本，不会把多次生成混在一起；live 用例始终只保留最新一次，避免跨版本重复。测试用例页查看历史版本时只读，执行/编辑/删除/AI 质检需切回实时用例。
-- 评估实验的 `cost` 为 `null`：客户端虽然记录了响应 usage 用于诊断，但未把它纳入成本估算；只报告真实调用次数与耗时。
-- 工作流按单需求版本串行执行；同一需求顺序做基线与方案对比属于配对观察，不是独立随机样本。
+用例生成使用 SSE，事件包括 `started / progress / case_draft / case / fallback / complete / error`，页面会显示批次进度、逐条候选、来源和降级原因。
 
-## 发布到 GitHub
+---
+
+## 项目结构
+
+```text
+AICase/
+├─ app/
+│  ├─ routers/            API 路由
+│  ├─ service/            生成、审核、执行、报告、版本与设置
+│  ├─ analyzer/           Spring / Vue 静态分析
+│  ├─ agent/              Agent 与质量闸
+│  │  └─ prompts/         外置提示词
+│  ├─ llm/                OpenAI 兼容客户端与响应归一化
+│  ├─ entity/models.py    23 张表 ORM 模型
+│  ├─ workflow/           工作流契约
+│  ├─ evaluation/         实验指标
+│  └─ main.py             FastAPI 入口
+├─ frontend/
+│  └─ src/
+│     ├─ views/           看板、项目、Pipeline、用例、执行、设置
+│     ├─ components/      标签页与上传组件
+│     ├─ api/             API 封装
+│     └─ utils/           共享工具
+├─ scripts/
+│  ├─ demo_site/          静态演示靶站
+│  ├─ order-system/       完整订单系统靶站
+│  ├─ e2e.py              端到端自检
+│  ├─ evaluate_*.py       对照实验
+│  └─ gen_mysql_ddl.py    MySQL DDL 生成
+├─ tests/                 pytest
+├─ migrations/mysql/      初始化 DDL
+├─ docs/                  设计与迭代文档
+└─ outputs/               截图 / 录屏 / 报告
+```
+
+---
+
+## 设计原则
+
+**Facts over guesses.**  
+模型只能引用静态分析得到的路由、字段、选择器和文案；无法建立事实依据的用例不进入执行。
+
+**Deterministic where possible.**  
+静态分析、质量闸、数量改写、执行器和覆盖统计保持纯规则；LLM 只做语义增强，不决定执行事实。
+
+**Evidence over claims.**  
+执行结果必须带步骤、截图、录屏和错误信息；没有证据的结论标记为 `unknown`，不冒充产品缺陷。
+
+**Immutable versions.**  
+每次生成都是独立快照；实时用例代表最新状态，历史版本只读，避免跨版本合并和重复。
+
+**Honest degradation.**  
+LLM 不可用、输出非法或模型能力不匹配时，显式降级到规则或确定性问题，不静默伪造成功。
+
+---
+
+## 测试
 
 ```bash
-git init -b main
-git add .
-git commit -m "chore: initial commit"
-git remote add origin https://github.com/<you>/<repo>.git
-git push -u origin main
+# 后端测试
+.venv/Scripts/python.exe -m pytest -q
+# 138 passed
+
+# 前端构建
+cd frontend
+npm run build
 ```
 
-> `.env`、`data/`、`outputs/`、`node_modules/`、`dist/` 等已在 `.gitignore` 中排除，不会误提交敏感信息。
+常用脚本：
+
+| 脚本 | 用途 |
+|---|---|
+| `scripts/analyze_cli.py` | 不落库，直接分析一个源码目录 |
+| `scripts/e2e.py` | 临时数据库上的端到端自检 |
+| `scripts/evaluate_workflow.py` | 生成 vs 生成+审核的质量对照实验 |
+| `scripts/evaluate_result_analysis.py` | 结果分析分类评测 |
+| `scripts/gen_mysql_ddl.py` | 从 ORM 重新生成 MySQL DDL |
+| `scripts/fix_expected_results.py` | 修复历史逐字符预期结果（幂等） |
+
+---
+
+## 边界与约束
+
+- 静态分析主要覆盖 Java Spring Boot + Vue 3，不是通用语言解析器。
+- 当前只读取本机源码目录，不执行 Git 拉取或源码压缩包解压。
+- 执行依赖被测站点可访问且已安装 Playwright Chromium；目标不可达时不自动重试。
+- 平台没有用户/权限体系，默认只适合单机或可信内网。
+- LLM Key 以明文保存在 `.env` / 数据库，接口只返回掩码；请限制环境访问权限。
+- 共享测试数据没有通用 reset；数量断言只自动处理“创建动作 + 单个列表总数 +1”。
+- 历史版本只读，不能直接从快照执行；执行前需切回实时用例。
+- Pipeline 使用后台线程运行，服务重启后只回收长时间无活动的运行；当前未提供取消 API。
+
+---
+
+## Roadmap
+
+- Git 仓库拉取与源码压缩包导入
+- 直接从历史生成版本恢复/执行
+- Pipeline 取消、暂停与断点续跑
+- 执行证据接入对象存储
+- 更多技术栈的静态分析器
+- CI/CD 与测试报告集成
+
+---
+
+## Contributing
+
+欢迎提交 Issue 和 Pull Request。提交前请确保：
+
+1. `pytest -q` 全部通过；
+2. 前端 `npm run build` 通过；
+3. LLM 仍然是可选项，新功能在无 Key 时能够确定性降级；
+4. 不把真实 API Key、数据库连接和运行数据提交到仓库。
+
+---
+
+## License
+
+当前仓库未附带 LICENSE 文件。如需开源发布，请补充许可证后再对外分发。
