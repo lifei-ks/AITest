@@ -176,7 +176,10 @@ def list_requirements(session: Session, pid: str) -> list[dict]:
     ensure_initial_requirement(session, project)
     reqs = list(
         session.scalars(
-            select(Requirement).where(Requirement.project_id == pid).order_by(Requirement.created_at.asc())
+            select(Requirement)
+            .where(Requirement.project_id == pid)
+            # 同一秒创建多个版本时用版本号稳定排序，避免“最新版本”退化成 V1
+            .order_by(Requirement.created_at.asc(), Requirement.version.asc())
         )
     )
     points, cases = _counts(session, [r.id for r in reqs])

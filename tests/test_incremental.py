@@ -585,3 +585,24 @@ def test_snapshot_builder_keeps_params_and_auth(tmp_path):
         assert endpoint["params"][0]["required"] is True
         assert endpoint["auth"] == ["@PreAuthorize('hasRole(ADMIN)')"]
         assert snap["rules"][0]["description"] == "手机号必填"
+
+
+def test_infer_page_route_does_not_fake_ui_for_api_only_endpoint():
+    from app.analyzer.models import FrontendResult, Page
+
+    frontend = FrontendResult(pages=[
+        Page(name="新建订单", route="/orders/create", file="create.vue"),
+        Page(name="订单列表", route="/orders/list", file="list.vue"),
+    ])
+    assert incremental_service._infer_page_route(
+        {"method": "POST", "path": "/api/orders"}, frontend
+    ) == "/orders/create"
+    assert incremental_service._infer_page_route(
+        {"method": "GET", "path": "/api/orders"}, frontend
+    ) == "/orders/list"
+    assert incremental_service._infer_page_route(
+        {"method": "POST", "path": "/api/orders/{id}/pay"}, frontend
+    ) == "/orders/list"
+    assert incremental_service._infer_page_route(
+        {"method": "GET", "path": "/api/orders/statistics"}, frontend
+    ) == ""

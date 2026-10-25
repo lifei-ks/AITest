@@ -298,7 +298,7 @@ WorkflowRun.summary → workflow 报告 + 项目报告附加区块
 
 ```bash
 pytest -q
-# 150 passed, 1 warning（StarletteDeprecationWarning）
+# 151 passed, 1 warning（StarletteDeprecationWarning）
 
 cd frontend && npm run build
 # ✓ built（仅有既有 chunk >500kB 提示）

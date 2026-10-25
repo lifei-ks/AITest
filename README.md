@@ -409,7 +409,7 @@ LLM 不可用、输出非法或模型能力不匹配时，显式降级到规则�
 ```bash
 # 后端测试
 .venv/Scripts/python.exe -m pytest -q
-# 150 passed
+# 151 passed
 
 # 前端构建
 cd frontend

@@ -1291,15 +1291,25 @@ def _make_point(
     description: str = "",
     module: str = "",
     ref_kind: str = "endpoint",
+    page_route: str | None = None,
 ) -> dict:
-    signature = _sha([title, category, expected])[:12]
+    route = page_route if page_route is not None else ""
+    # 纯 API 接口没有 UI 页面，预期结果应描述 HTTP 行为，不能借用别的页面文案。
+    if ref_kind == "endpoint" and not route:
+        if category == "permission":
+            expected = "接口返回未授权（HTTP 401/403）"
+        elif category in ("negative", "boundary"):
+            expected = "接口返回参数校验错误（HTTP 4xx）"
+        else:
+            expected = "接口返回成功响应（HTTP 2xx）"
+    signature = _sha([title, category, expected, route])[:12]
     return {
         "id": uuid.uuid4().hex,
         "title": title[:255],
         "category": category,
         "priority": priority,
         "description": description or title,
-        "pageRoute": endpoint.get("path") or "",
+        "pageRoute": route,
         "endpoint": f"{endpoint.get('method')} {endpoint.get('path')}".strip(),
         "fields": (fields or [])[:20],
         "expected": expected,
@@ -1309,7 +1319,44 @@ def _make_point(
         "_endpoint_key": endpoint_key(endpoint) if ref_kind == "endpoint" else change.match_key,
         "_module": module or endpoint.get("controller") or "接口增量",
         "_point_sig": signature,
+        # 纯 API 接口或业务规则没有可执行 UI 页面时，只生成 manual/待补充用例
+        "_manual_only": ref_kind != "endpoint" or not route,
     }
+
+
+def _infer_page_route(endpoint: dict, frontend) -> str:
+    """把后端接口映射到已有前端页面；纯 API 接口返回空，避免伪造 UI 步骤。"""
+    pages = getattr(frontend, "pages", []) or []
+    routes = [str(page.route or "") for page in pages if page.route]
+    if not routes:
+        return ""
+    path = normalize_path(endpoint.get("path"))
+    method = str(endpoint.get("method") or "").upper()
+    path_text = path.lower()
+    for route in routes:
+        if normalize_path(route) == path:
+            return route
+    if method == "GET" and path_text.endswith("/orders"):
+        for route in routes:
+            if "list" in route.lower():
+                return route
+    if method == "POST" and path_text.endswith("/orders"):
+        for route in routes:
+            if "create" in route.lower() or "add" in route.lower():
+                return route
+    if method in ("PUT", "DELETE") and "{param}" in path:
+        for route in routes:
+            if "list" in route.lower() or "detail" in route.lower() or "edit" in route.lower():
+                return route
+    if any(word in path_text for word in ("/pay", "/ship", "/complete", "/cancel", "/refund")):
+        for route in routes:
+            if "list" in route.lower():
+                return route
+    if method == "GET" and "{param}" in path:
+        for route in routes:
+            if "detail" in route.lower():
+                return route
+    return ""
 
 
 def _build_points_for_changes(
@@ -1333,6 +1380,7 @@ def _build_points_for_changes(
         endpoint = new if new else old
         if not endpoint:
             continue
+        page_route = _infer_page_route(endpoint, frontend)
         old_params = {f"{p.get('name')}|{p.get('source')}": p for p in old.get("params") or []}
         new_params = {f"{p.get('name')}|{p.get('source')}": p for p in new.get("params") or []}
         changed_params = []
@@ -1357,6 +1405,7 @@ def _build_points_for_changes(
                 expected=success,
                 fields=[p.get("name") for p in new_params.values() if p.get("required")],
                 description="新增接口的主流程回归",
+                page_route=page_route,
             ))
             for param in changed_params[:4]:
                 points.append(_make_point(
@@ -1368,6 +1417,7 @@ def _build_points_for_changes(
                     expected=_constraint_expected(param),
                     fields=[param.get("name")],
                     description=f"新增参数 {param.get('name')}，来源 {param.get('source')}",
+                    page_route=page_route,
                 ))
             if endpoint.get("auth"):
                 points.append(_make_point(
@@ -1378,6 +1428,7 @@ def _build_points_for_changes(
                     priority="P1",
                     expected="「无权限」",
                     description=f"接口鉴权要求：{'；'.join(endpoint.get('auth') or [])}",
+                    page_route=page_route,
                 ))
             for transition in transitions:
                 trigger = str(transition.get("trigger") or "")
@@ -1391,6 +1442,7 @@ def _build_points_for_changes(
                         priority="P1",
                         expected=f"「{trigger}成功」",
                         description=f"状态从 {transition.get('from')} 到 {transition.get('to')}",
+                        page_route=page_route,
                     ))
         else:
             for param in changed_params[:4]:
@@ -1404,6 +1456,7 @@ def _build_points_for_changes(
                     expected=_constraint_expected(param),
                     fields=[param.get("name")],
                     description=f"{action}参数 {param.get('name')}，需验证新约束",
+                    page_route=page_route,
                 ))
             if sorted(old.get("auth") or []) != sorted(new.get("auth") or []):
                 points.append(_make_point(
@@ -1414,6 +1467,7 @@ def _build_points_for_changes(
                     priority="P1",
                     expected="「无权限」",
                     description="接口鉴权要求发生变化",
+                    page_route=page_route,
                 ))
             if old.get("path") != new.get("path"):
                 points.append(_make_point(
@@ -1424,6 +1478,7 @@ def _build_points_for_changes(
                     priority="P0",
                     expected=success,
                     description="接口路径变化，验证新路径可访问",
+                    page_route=page_route,
                 ))
             if not changed_params and sorted(old.get("auth") or []) == sorted(new.get("auth") or []) and old.get("path") == new.get("path"):
                 points.append(_make_point(
@@ -1434,6 +1489,7 @@ def _build_points_for_changes(
                     priority="P0",
                     expected=success,
                     description="接口发生变更，执行主流程回归",
+                    page_route=page_route,
                 ))
 
     for change in rule_changes[:10]:
@@ -1497,23 +1553,27 @@ def _generate_cases_for_points(
         except BizError:
             backend, frontend, machines = BackendResult(), FrontendResult(), []
     cases: list[GeneratedCase] = []
-    if mode in ("llm", "auto"):
+    manual_only = [point for point in points if point.get("_manual_only")]
+    ui_points = [point for point in points if not point.get("_manual_only")]
+    if ui_points and mode in ("llm", "auto"):
         client = settings_service.get_text_client(profile_id)
         if client.available():
             try:
                 cases.extend(generation_service._gen_llm_for_points(
-                    client, requirement, points, backend, frontend, machines
+                    client, requirement, ui_points, backend, frontend, machines
                 ))
             except LlmUnavailable as exc:
                 logger.warning("增量用例 LLM 生成失败，降级规则: %s", exc)
     covered = {case.test_point_id for case in cases if case.test_point_id}
-    missing = [point for point in points if point["id"] not in covered]
+    missing = [point for point in ui_points if point["id"] not in covered]
     if missing:
         cases.extend(generate_rule_cases_for_points(missing, backend, frontend, machines))
     covered = {case.test_point_id for case in cases if case.test_point_id}
-    for point in points:
+    for point in ui_points:
         if point["id"] not in covered:
             cases.append(_manual_case(point, requirement))
+    for point in manual_only:
+        cases.append(_manual_case(point, requirement))
     return cases
 
 

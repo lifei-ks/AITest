@@ -6,7 +6,7 @@
           <span class="field-label">基线版本</span>
           <el-select v-model="baselineId" class="select-requirement" placeholder="选择一期基线">
             <el-option
-              v-for="r in requirements"
+              v-for="r in orderedRequirements"
               :key="r.id"
               :label="`${r.version} · ${r.name}`"
               :value="r.id"
@@ -17,7 +17,7 @@
           <span class="field-label">当前版本</span>
           <el-select v-model="currentId" class="select-requirement" placeholder="选择二期版本">
             <el-option
-              v-for="r in requirements"
+              v-for="r in orderedRequirements"
               :key="r.id"
               :label="`${r.version} · ${r.name}`"
               :value="r.id"
@@ -348,6 +348,23 @@ const changeFilter = ref('all')
 const caseFilter = ref('all')
 
 const textProfiles = computed(() => profiles.value.filter((item) => item.kind === 'text' && item.enabled))
+const orderedRequirements = computed(() => {
+  const rank = (value) => (String(value || '').match(/\d+/g) || []).map(Number)
+  return [...requirements.value].sort((a, b) => {
+    const ar = rank(a.version)
+    const br = rank(b.version)
+    for (let i = 0; i < Math.max(ar.length, br.length); i += 1) {
+      const diff = (ar[i] || 0) - (br[i] || 0)
+      if (diff) return diff
+    }
+    return new Date(a.createdAt || 0) - new Date(b.createdAt || 0)
+  })
+})
+const baselineBeforeCurrent = computed(() => {
+  const base = orderedRequirements.value.findIndex((item) => item.id === baselineId.value)
+  const current = orderedRequirements.value.findIndex((item) => item.id === currentId.value)
+  return base >= 0 && current >= 0 && base < current
+})
 const summary = computed(() => run.value?.summary || {})
 const endpointCounts = computed(() => summary.value.endpointCounts || {})
 const caseSummary = computed(() => summary.value.caseChanges || {})
@@ -361,7 +378,8 @@ const transitionChangeCount = computed(
   () => (run.value?.changes || []).filter((row) => row.entityType === 'state_transition').length,
 )
 const canAnalyze = computed(
-  () => !!baselineId.value && !!currentId.value && baselineId.value !== currentId.value && !analyzing.value,
+  () => !!baselineId.value && !!currentId.value && baselineId.value !== currentId.value
+    && baselineBeforeCurrent.value && !analyzing.value,
 )
 
 const filteredChanges = computed(() => {
@@ -540,18 +558,19 @@ async function loadRequirements() {
   } catch {
     requirements.value = []
   }
-  const valid = requirements.value.some((item) => item.id === currentId.value)
+  const ordered = orderedRequirements.value
+  const valid = ordered.some((item) => item.id === currentId.value)
   if (!valid) {
-    const preferred = props.requirementId && requirements.value.some((item) => item.id === props.requirementId)
+    const preferred = props.requirementId && ordered.some((item) => item.id === props.requirementId)
       ? props.requirementId
-      : [...requirements.value].reverse().find((item) => item.status === 'ready')?.id
-      || requirements.value[requirements.value.length - 1]?.id
+      : [...ordered].reverse().find((item) => item.status === 'ready')?.id
+      || ordered[ordered.length - 1]?.id
       || ''
     currentId.value = preferred
   }
   if (!baselineId.value || baselineId.value === currentId.value) {
-    const index = requirements.value.findIndex((item) => item.id === currentId.value)
-    baselineId.value = index > 0 ? requirements.value[index - 1].id : ''
+    const index = ordered.findIndex((item) => item.id === currentId.value)
+    baselineId.value = index > 0 ? ordered[index - 1].id : ''
   }
 }
 
@@ -631,7 +650,9 @@ async function createBaseline() {
 }
 
 async function analyze() {
-  if (!canAnalyze.value) return ElMessage.warning('请选择不同的基线和当前版本')
+  if (!canAnalyze.value) {
+    return ElMessage.warning('请选择不同的基线和当前版本，且基线必须早于当前版本')
+  }
   analyzing.value = true
   try {
     run.value = await analyzeIncremental(currentId.value, {
@@ -685,9 +706,10 @@ async function reviewRegression(row, status) {
 
 watch(currentId, async (value) => {
   if (value) emit('update:requirementId', value)
-  const index = requirements.value.findIndex((item) => item.id === value)
-  if (index > 0 && (!baselineId.value || baselineId.value === value || !requirements.value.some((item) => item.id === baselineId.value))) {
-    baselineId.value = requirements.value[index - 1].id
+  const ordered = orderedRequirements.value
+  const index = ordered.findIndex((item) => item.id === value)
+  if (index > 0 && (!baselineId.value || baselineId.value === value || !ordered.some((item) => item.id === baselineId.value))) {
+    baselineId.value = ordered[index - 1].id
   }
   run.value = null
   runId.value = ''
