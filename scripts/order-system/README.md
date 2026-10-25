@@ -3,6 +3,9 @@
 一个可运行的最小订单管理系统，用 **Spring Boot 3.4 + Vue 3** 实现，专门用来给 AICase 当被测系统：
 代码结构、状态流转、表单校验、页面文案都按「能被静态分析、能被 Playwright 自动执行」的方式写。
 
+> 当前代码为 **V2.0**：在 V1 基础上新增「金额区间筛选」「批量取消」「订单统计」三个功能。
+> 二期技术文档见 [`docs/TECH-DESIGN-V2.0.md`](docs/TECH-DESIGN-V2.0.md)。
+
 ## 一、快速启动
 
 ### 后端（8080）
@@ -39,8 +42,9 @@ python scripts/check_ui.py
 
 | 路由 | 页面 | 内容 |
 |---|---|---|
-| `/orders/list` | 订单列表 | 关键字/状态筛选、分页、按状态显示可执行操作 |
+| `/orders/list` | 订单列表 | 关键字/状态/金额区间筛选、分页、勾选批量取消、按状态显示可执行操作 |
 | `/orders/create` | 新建订单 | 5 字段表单：收货人、手机号、收货地址、订单金额、备注 |
+| `/orders/statistics` | 订单统计 | 订单总数、总额、平均金额、状态分布、有效金额 |
 
 订单状态与操作：
 
@@ -57,7 +61,7 @@ CREATED 待支付 ──支付──> PAID 已支付 ──发货──> SHIPPED
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | POST | `/api/orders` | 创建订单（初始状态待支付） |
-| GET | `/api/orders` | 分页列表，参数 `page` / `pageSize` / `status` / `keyword` |
+| GET | `/api/orders` | 分页列表，参数 `page` / `pageSize` / `status` / `keyword` / `minAmount` / `maxAmount` |
 | GET | `/api/orders/status-options` | 状态下拉选项 |
 | GET | `/api/orders/{id}` | 详情 |
 | PUT | `/api/orders/{id}` | 修改收货信息（已完成/已取消不可改） |
@@ -67,6 +71,8 @@ CREATED 待支付 ──支付──> PAID 已支付 ──发货──> SHIPPED
 | POST | `/api/orders/{id}/complete` | 完成（仅已发货） |
 | POST | `/api/orders/{id}/cancel` | 取消（仅待支付） |
 | POST | `/api/orders/{id}/refund` | 退款（仅已支付） |
+| POST | `/api/orders/batch-cancel` | 批量取消待支付订单，允许部分成功 |
+| GET | `/api/orders/statistics` | 订单统计：总数、总额、平均金额、状态分布 |
 | POST | `/api/demo/reset` | 恢复 4 条种子订单（测试环境用） |
 
 统一响应：`{ "code": 0, "message": "ok", "data": ... }`；业务失败 `code = 40001`，参数校验失败 `code = 40000`。

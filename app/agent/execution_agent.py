@@ -88,6 +88,13 @@ def _fallback_chain(step: dict) -> list[str]:
     # 2. target 文本在 button/a/[role=button]
     if target:
         chain.append(f'button:has-text("{target}"), a:has-text("{target}"), [role="button"]:has-text("{target}")')
+    # 2.1 Element Plus 下拉选项（订单状态等 select 展开后渲染到 body 的 popper 中）
+    if target:
+        chain.append(
+            f'[role="option"]:has-text("{target}"), '
+            f'.el-select-dropdown__item:has-text("{target}"), '
+            f'.el-select-dropdown__item span:has-text("{target}")'
+        )
     # 3. target 文本整页（排除 option/script/style）
     if target:
         chain.append(f'body :not(option):not(script):not(style):has-text("{target}")')

@@ -704,6 +704,24 @@ def _normalize_steps(raw_steps) -> list[dict]:
     return out
 
 
+UNSUPPORTED_UI_WORDS = ("勾选", "复选框", "选中行", "全选", "API", "接口注入", "注入数据")
+
+
+def _has_unsupported_ui_step(steps: list[dict]) -> bool:
+    """执行器只能输入、点击、断言；表格勾选和 API 注入类步骤必然失败，直接拒收。"""
+    for step in steps:
+        selector = step.get("uiSelector") or {}
+        text = " ".join(
+            str(part or "")
+            for part in (step.get("action"), step.get("target"), selector.get("value"))
+        )
+        if any(word in text for word in UNSUPPORTED_UI_WORDS):
+            return True
+        if "batch-cancel" in text:
+            return True
+    return False
+
+
 def _gen_llm_for_points(
     client, requirement, points, backend, frontend, machines, on_event=None, run_info=None
 ) -> list:
@@ -814,6 +832,9 @@ def _gen_llm_for_points(
                 continue
             steps = _normalize_steps(rc.get("structuredSteps"))
             if not steps:
+                continue
+            if _has_unsupported_ui_step(steps):
+                logger.warning("LLM 用例包含执行器不支持的勾选/API 步骤，改由规则生成: %s", rc.get("title"))
                 continue
             allowed_selector_types = {"route", "placeholder", "text", "label", "role", "testid"}
             if any(
@@ -1041,7 +1062,10 @@ def list_case_generations(session: Session, requirement_id: str, limit: int = 50
     rows = list(
         session.scalars(
             select(CaseGeneration)
-            .where(CaseGeneration.requirement_id == requirement_id)
+            .where(
+                CaseGeneration.requirement_id == requirement_id,
+                CaseGeneration.mode != "incremental",
+            )
             .order_by(CaseGeneration.created_at.desc())
             .limit(max(1, min(100, limit)))
         )
@@ -1064,7 +1088,7 @@ def list_case_generations(session: Session, requirement_id: str, limit: int = 50
 
 def get_case_generation(session: Session, requirement_id: str, generation_id: str) -> dict:
     row = session.get(CaseGeneration, generation_id)
-    if row is None or row.requirement_id != requirement_id:
+    if row is None or row.requirement_id != requirement_id or row.mode == "incremental":
         from app.common.errors import BizError
 
         raise BizError(40409, f"生成版本不存在: {generation_id}", http_status=404)

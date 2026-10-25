@@ -168,7 +168,7 @@ WorkflowRun.summary → workflow 报告 + 项目报告附加区块
 | `llm_profiles` | 多套 LLM 配置 | kind(text/vision)、name、api_key、base_url、model、enabled、is_default |
 | `case_generations` | 用例生成版本快照 | requirement_id、mode、profile_id、case_count、summary、snapshot |
 
-所有 JSON 字段仍用 `Text` 存字符串；不修改已有表。MySQL DDL 已重新生成：`migrations/mysql/001_init.sql`（27 张表，新增 `llm_profiles`、`id_sequences`、`case_generations` 及 4 张增量分析表）。
+所有 JSON 字段仍用 `Text` 存字符串；不修改已有表。MySQL DDL 已重新生成：`migrations/mysql/001_init.sql`（23 张表，包含 `llm_profiles`、`id_sequences`、`case_generations`）。
 
 ## 6. API
 
@@ -298,7 +298,7 @@ WorkflowRun.summary → workflow 报告 + 项目报告附加区块
 
 ```bash
 pytest -q
-# 151 passed, 1 warning（StarletteDeprecationWarning）
+# 144 passed, 1 warning（StarletteDeprecationWarning）
 
 cd frontend && npm run build
 # ✓ built（仅有既有 chunk >500kB 提示）
@@ -394,14 +394,3 @@ cd frontend && npm run build
 - `tests/test_workflow.py`、`tests/test_evaluation.py`、`tests/test_count_assertion.py`、`tests/test_llm_profiles.py`
 - `scripts/evaluate_workflow.py`、`scripts/evaluate_result_analysis.py`
 - `migrations/mysql/001_init.sql`（已包含新表）
-
-
-## 增量需求分析（多期迭代）
-
-- 每个需求版本可建立一份 `requirement_snapshots` 接口/规则快照；下一期以该快照为明确基线。
-- 变更识别对比 HTTP 方法、规范化路径、参数/必填性/约束、鉴权、关联业务规则，输出 `added / modified / deleted / unchanged / uncertain`。
-- 文档未提及的旧接口只标记 `uncertain`，不会直接删除；明确删除或人工确认后才进入 `pending_delete`，历史用例与执行记录保留。
-- 只对新增/修改测试点生成；未变化接口复用历史用例内容（克隆到当前版本，不调用 LLM）；修改接口保留旧用例并生成变化部分。
-- 回归推荐按直接受影响、间接受影响、未发现影响分级，记录推断原因，支持人工采纳/忽略。
-- 新增表：`requirement_snapshots`、`requirement_change_runs`、`requirement_changes`、`requirement_case_changes`；已有库执行 `migrations/mysql/002_incremental.sql`。
-- 已知限制：基线快照应在一期代码分析后建立；参数/鉴权/规则匹配和影响推荐是规则推断，不是完整调用链分析；无前端页面的新增接口可能生成 manual/待补充用例。

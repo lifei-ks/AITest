@@ -11,6 +11,7 @@
       >
         <el-menu-item index="/orders/list">订单列表</el-menu-item>
         <el-menu-item index="/orders/create">新建订单</el-menu-item>
+        <el-menu-item index="/orders/statistics">订单统计</el-menu-item>
       </el-menu>
     </el-header>
     <el-main class="main">

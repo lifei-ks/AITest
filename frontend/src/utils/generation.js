@@ -8,8 +8,6 @@ export function generationLabel(g) {
   let modeText = '规则'
   if (g.mode === 'legacy') {
     modeText = llm && rule ? `历史归档（LLM ${llm} + 规则 ${rule}）` : '历史归档'
-  } else if (g.mode === 'incremental') {
-    modeText = '增量生成'
   } else if (g.mode === 'llm') {
     modeText = llm && rule ? `LLM ${llm} + 规则 ${rule}` : 'LLM'
   } else if (g.mode === 'rule') {

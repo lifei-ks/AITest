@@ -1,6 +1,7 @@
 package com.order.controller;
 
 import com.order.common.ApiResponse;
+import com.order.dto.BatchCancelRequest;
 import com.order.dto.CreateOrderRequest;
 import com.order.dto.UpdateOrderRequest;
 import com.order.entity.Order;
@@ -17,6 +18,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -47,8 +49,10 @@ public class OrderController {
             @RequestParam(defaultValue = "1") int page,
             @RequestParam(defaultValue = "10") int pageSize,
             @RequestParam(required = false) String status,
-            @RequestParam(required = false) String keyword) {
-        return ApiResponse.ok(orderService.list(page, pageSize, status, keyword));
+            @RequestParam(required = false) String keyword,
+            @RequestParam(required = false) BigDecimal minAmount,
+            @RequestParam(required = false) BigDecimal maxAmount) {
+        return ApiResponse.ok(orderService.list(page, pageSize, status, keyword, minAmount, maxAmount));
     }
 
     /** 状态下拉选项，供前端筛选使用。 */
@@ -62,6 +66,18 @@ public class OrderController {
             options.add(item);
         }
         return ApiResponse.ok(options);
+    }
+
+    /** 订单统计，供统计看板使用。 */
+    @GetMapping("/statistics")
+    public ApiResponse<Map<String, Object>> statistics() {
+        return ApiResponse.ok(orderService.statistics());
+    }
+
+    /** 批量取消待支付订单；允许部分成功，逐条返回结果。 */
+    @PostMapping("/batch-cancel")
+    public ApiResponse<Map<String, Object>> batchCancel(@Valid @RequestBody BatchCancelRequest request) {
+        return ApiResponse.ok(orderService.batchCancel(request.getIds()));
     }
 
     @GetMapping("/{id}")

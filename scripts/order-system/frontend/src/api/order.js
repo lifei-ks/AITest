@@ -43,3 +43,11 @@ export function refundOrder(id) {
 export function fetchStatusOptions() {
   return request.get('/orders/status-options')
 }
+
+export function batchCancelOrders(ids) {
+  return request.post('/orders/batch-cancel', { ids })
+}
+
+export function fetchStatistics() {
+  return request.get('/orders/statistics')
+}

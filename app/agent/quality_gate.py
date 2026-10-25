@@ -182,6 +182,14 @@ def _is_duplicate(case, existing) -> bool:
         and not _same_expected(case, existing)
     ):
         return False
+    # 不同测试点的用例即使步骤相同也保留：否则同页面的冒烟用例会被合并，
+    # 导致其中一个测试点在覆盖矩阵里无对应用例
+    if (
+        case.test_point_id
+        and existing.test_point_id
+        and case.test_point_id != existing.test_point_id
+    ):
+        return False
     return _similarity(case, existing) > 0.95
 
 

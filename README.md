@@ -103,17 +103,7 @@ Playwright 逐步执行用例，支持多级定位兜底、URL/文案/状态断�
 
 支持快速创建项目、上传需求文档、选择测试点 LLM 和用例 LLM；缺少代码分析时自动补跑。
 
-### 09 · 多期需求增量分析
-
-- 每个需求版本可固化一份不可变接口/规则快照，作为下一期的明确基线；没有基线快照时拒绝差异分析，不会把全部接口误判为新增。
-- 对比 HTTP 方法、规范化路径、参数结构、必填性、约束、鉴权要求和关联业务规则，输出新增 / 修改 / 删除候选 / 未变化 / 待人工确认 / 冲突。
-- 技术文档未提及旧接口只标记为“待确认”，不会直接删除；只有文档明确删除或人工确认后才进入待删除流程，历史用例与执行记录保留。
-- 只对新增和修改的测试点生成用例；未变化接口复用历史用例内容，不重新调用 LLM；被修改接口保留旧用例并生成变化部分的新用例。
-- 回归推荐区分直接受影响、间接受影响和未发现影响，记录推断依据；支持人工采纳/忽略，不声称拥有完整依赖图。
-- 增量运行、变更明细、用例去向和回归推荐独立落库；重复执行通过 dedupe key 复用已有用例，失败回滚不破坏一期数据。
-- 新增表：`requirement_snapshots`、`requirement_change_runs`、`requirement_changes`、`requirement_case_changes`；已有库执行 `migrations/mysql/002_incremental.sql`，SQLite 启动自动建表。
-
-### 10 · 覆盖与执行成功矩阵
+### 09 · 覆盖与执行成功矩阵
 
 - 覆盖矩阵区分“规划覆盖”和“执行成功覆盖”，覆盖接口、状态流转与业务规则。
 - 执行成功覆盖只统计 `status=passed` 且属于当前实时用例的执行记录；旧版本或被新生成替换的用例不会继续贡献覆盖率。
@@ -241,7 +231,7 @@ powershell -File scripts/dev.ps1
 | 靶站 | 端口 | 启动方式 |
 |---|---|---|
 | 静态演示站（默认目标） | 8200 | `.venv/Scripts/python.exe scripts/demo_site/serve.py` |
-| 完整订单系统（Spring Boot + Vue） | 8080 / 5273 | 见 [`scripts/order-system/README.md`](scripts/order-system/README.md) |
+| 完整订单系统 V2（Spring Boot + Vue） | 8080 / 5273 | 金额区间筛选、批量取消、订单统计；见 [`scripts/order-system/README.md`](scripts/order-system/README.md) 与 [`V2 技术文档`](scripts/order-system/docs/TECH-DESIGN-V2.0.md) |
 
 使用完整订单系统时，把项目「被测地址」设为 `http://127.0.0.1:5273`。
 
@@ -275,7 +265,7 @@ mysql -u root -p aicase < migrations/mysql/001_init.sql
 DATABASE_URL=mysql+pymysql://user:password@127.0.0.1:3306/aicase?charset=utf8mb4
 ```
 
-DDL 当前包含 27 张表。SQLite 会在后端启动时自动建表；MySQL 建议使用 DDL 初始化，并保持字符串列排序规则一致。
+DDL 当前包含 23 张表。SQLite 会在后端启动时自动建表；MySQL 建议使用 DDL 初始化，并保持字符串列排序规则一致。
 
 ---
 
@@ -295,7 +285,7 @@ DDL 当前包含 27 张表。SQLite 会在后端启动时自动建表；MySQL �
 |---|---|
 | `/dashboard` | 总览看板 |
 | `/projects` | 项目列表 |
-| `/projects/:id` | 项目详情（代码分析 / 需求版本 / 增量分析 / 用例生成 / 测试用例 / 覆盖矩阵 / 脑图 / 执行结果） |
+| `/projects/:id` | 项目详情（代码分析 / 需求版本 / 用例生成 / 测试用例 / 覆盖矩阵 / 脑图 / 执行结果） |
 | `/pipeline` | Pipeline 一键执行 |
 | `/testcases` | 全局用例列表 |
 | `/executions` | 全局执行结果 |
@@ -339,7 +329,6 @@ curl -X POST http://127.0.0.1:8100/api/projects/<pid>/workflows \
 | 测试点 | `GET /api/requirements/{rid}/test-points` |
 | 生成 | `POST /api/requirements/{rid}/generate`、`GET /api/requirements/{rid}/generate/stream` |
 | 版本 | `GET /api/requirements/{rid}/generations`、`GET /api/requirements/{rid}/generations/{gid}` |
-| 增量分析 | `POST/GET /api/requirements/{rid}/snapshot`、`POST /api/requirements/{rid}/incremental/analyze`、`GET /api/incremental/runs/{run_id}`、`POST /api/incremental/runs/{run_id}/generate`、`POST /api/incremental/runs/{run_id}/changes/{change_id}/review`、`POST /api/incremental/case-changes/{case_change_id}/regression` |
 | 用例 | `GET/POST /api/projects/{pid}/testcases`、`POST .../ai-review`、`POST .../ai-fix` |
 | 执行 | `POST /api/projects/{pid}/testcases/{cid}/execute`、`GET /api/executions/{eid}` |
 | 工作流 | `POST/GET /api/projects/{pid}/workflows`、`GET /api/workflows/{run_id}` |
@@ -361,7 +350,7 @@ AICase/
 │  ├─ agent/              Agent 与质量闸
 │  │  └─ prompts/         外置提示词
 │  ├─ llm/                OpenAI 兼容客户端与响应归一化
-│  ├─ entity/models.py    27 张表 ORM 模型
+│  ├─ entity/models.py    23 张表 ORM 模型
 │  ├─ workflow/           工作流契约
 │  ├─ evaluation/         实验指标
 │  └─ main.py             FastAPI 入口
@@ -409,7 +398,7 @@ LLM 不可用、输出非法或模型能力不匹配时，显式降级到规则�
 ```bash
 # 后端测试
 .venv/Scripts/python.exe -m pytest -q
-# 151 passed
+# 144 passed
 
 # 前端构建
 cd frontend
@@ -438,8 +427,6 @@ npm run build
 - LLM Key 以明文保存在 `.env` / 数据库，接口只返回掩码；请限制环境访问权限。
 - 共享测试数据没有通用 reset；数量断言只自动处理“创建动作 + 单个列表总数 +1”。
 - 历史版本只读，不能直接从快照执行；执行前需切回实时用例。
-- 增量分析的基线快照应在一期代码分析完成后建立；如果先分析了二期代码再补建基线，公共鉴权/参数提取可能反映的是新代码。
-- 增量匹配、影响推荐基于代码事实、参数、鉴权、规则和 Controller/文件关系做规则推断，不是完整调用链分析；不确定项会要求人工确认。
 - 没有前端页面或无法生成结构化步骤的新增接口，会生成可审阅的 manual/待补充用例，而不是伪造可自动执行步骤。
 - Pipeline 使用后台线程运行，服务重启后只回收长时间无活动的运行；当前未提供取消 API。
 

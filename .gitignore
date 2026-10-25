@@ -43,3 +43,6 @@ Thumbs.db
 .codebuddy/
 .tmp*
 
+
+# order-system build output
+scripts/order-system/frontend/dist/

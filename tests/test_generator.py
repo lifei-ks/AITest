@@ -297,3 +297,109 @@ def test_llm_string_expected_results_keeps_full_sentence():
     )
     assert len(cases) == 1
     assert cases[0].expected_results == ["填写合法数据提交后页面提示「订单创建成功」"]
+
+
+def _filter_point(title: str, description: str, expected: str, route: str = "/orders/list") -> dict:
+    return {
+        "id": "tp-filter",
+        "title": title,
+        "category": "functional",
+        "priority": "P1",
+        "description": description,
+        "pageRoute": route,
+        "endpoint": "GET /api/orders",
+        "fields": [],
+        "expected": expected,
+    }
+
+
+def test_filter_point_clicks_query_and_only_fills_min():
+    """列表页筛选应点“查询”，且“只填最低金额”不能顺手填入最高金额。"""
+    backend, frontend, machines = _context()
+    point = _filter_point(
+        "只填最低金额100筛选订单",
+        "列表页只填最低金额100查询，返回金额≥100的订单，闭区间含边界",
+        "「查询」后列表仅剩金额≥100的订单",
+    )
+    cases = generate_rule_cases_for_points([point], backend, frontend, machines)
+    assert len(cases) == 1
+    case = cases[0]
+    actions = [s["action"] for s in case.structured_steps]
+    assert "点击查询" in actions
+    assert "点击提交" not in actions
+    inputs = [s for s in case.structured_steps if s["type"] == "input"]
+    assert [(s["target"], s["inputValue"]) for s in inputs] == [("最低金额", "100")]
+
+
+def test_filter_point_range_uses_both_amounts_and_order_no_anchor():
+    backend, frontend, machines = _context()
+    point = _filter_point(
+        "金额区间100-200筛选订单",
+        "填最低100、最高200查询，种子数据只剩199.00订单，total为1",
+        "「查询」后列表只剩订单号ORD20260101001",
+    )
+    cases = generate_rule_cases_for_points([point], backend, frontend, machines)
+    case = cases[0]
+    inputs = [s for s in case.structured_steps if s["type"] == "input"]
+    assert [(s["target"], s["inputValue"]) for s in inputs] == [
+        ("最低金额", "100"),
+        ("最高金额", "200"),
+    ]
+    assert case.expected_results == ["ORD20260101001"]
+
+
+def test_filter_point_status_select_uses_element_plus_dropdown_selectors():
+    backend, frontend, machines = _context()
+    point = _filter_point(
+        "金额区间与状态组合筛选",
+        "金额区间与订单状态组合查询，只返回同时满足金额和状态条件的订单",
+        "「查询」后列表仅剩同时满足两条件的订单",
+    )
+    cases = generate_rule_cases_for_points([point], backend, frontend, machines)
+    steps = cases[0].structured_steps
+    status_steps = [s for s in steps if "订单状态" in s["action"] or "已支付" in s["action"]]
+    assert len(status_steps) == 2
+    # 不能再用 input[placeholder] 点击，必须点 Element Plus 的 wrapper 和下拉项
+    assert status_steps[0]["uiSelector"]["type"] == "css"
+    assert "el-select__wrapper" in status_steps[0]["uiSelector"]["value"]
+    assert status_steps[1]["uiSelector"]["type"] == "css"
+    assert "el-select-dropdown__item" in status_steps[1]["uiSelector"]["value"]
+
+
+def test_stats_six_statuses_assert_each_label():
+    backend, frontend, machines = _context()
+    point = {
+        "id": "tp-stats-status",
+        "title": "状态分布六项齐全",
+        "category": "functional",
+        "priority": "P1",
+        "description": "统计接口固定返回6个状态数量，未出现的状态为0",
+        "pageRoute": "/orders/statistics",
+        "endpoint": "GET /api/orders/statistics",
+        "fields": [],
+        "expected": "「状态分布」",
+    }
+    cases = generate_rule_cases_for_points([point], backend, frontend, machines)
+    asserts = [s for s in cases[0].structured_steps if s["type"] == "state_assert"]
+    assert [s["expected"] for s in asserts] == [
+        "「待支付」", "「已支付」", "「已发货」", "「已完成」", "「已取消」", "「已退款」"
+    ]
+
+
+def test_stats_two_decimal_point_uses_capture_pattern():
+    backend, frontend, machines = _context()
+    point = {
+        "id": "tp-stats-decimal",
+        "title": "统计页面金额两位小数展示",
+        "category": "functional",
+        "priority": "P1",
+        "description": "统计页面总额、平均金额、有效金额统一保留2位小数",
+        "pageRoute": "/orders/statistics",
+        "endpoint": "GET /api/orders/statistics",
+        "fields": [],
+        "expected": "「刷新统计」后金额保留两位小数",
+    }
+    cases = generate_rule_cases_for_points([point], backend, frontend, machines)
+    capture = [s for s in cases[0].structured_steps if s["type"] == "capture"]
+    assert len(capture) == 1
+    assert capture[0]["pattern"] == r"订单总额\s*[¥￥]?\s*(\d+\.\d{2})"

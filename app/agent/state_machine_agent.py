@@ -25,6 +25,7 @@ SET_STATUS_RE = re.compile(r"\.?\s*set\w*Status\s*\(\s*([^)]*?)\s*\)")
 METHOD_SIG_RE = re.compile(r"\b(public|private|protected)\s+[A-Za-z_<>,\.\[\]\s]+\s+(\w+)\s*\(")
 IF_RE = re.compile(r"\bif\s*\(([^{}]*)\)")
 THROW_RE = re.compile(r"\bthrow\b")
+GUARD_EXIT_RE = re.compile(r"\b(throw|continue|return|break)\b")
 # 状态字面量："CREATED" 或 OrderStatus.CREATED
 STATUS_LITERAL_RE = re.compile(r'"([A-Z][A-Z0-9_]*)"|\b(?:[A-Z]\w+)?(?:Status|State)\s*\.\s*([A-Z][A-Z0-9_]*)')
 
@@ -99,7 +100,9 @@ def _extract_status_literals(guard: str) -> set[str]:
 
 
 def _is_negated(guard: str) -> bool:
-    """否定式：存在 ! 直接修饰 equals 调用或状态字面量。"""
+    """否定式：!X.equals(...)、!"X".equals(...) 或 status != OrderStatus.X。"""
+    if "!=" in guard and _extract_status_literals(guard):
+        return True
     return bool(re.search(r'!\s*(?:[\w.\"\'()]+\.equals|"[A-Z_]+")', guard))
 
 
@@ -151,18 +154,17 @@ def extract_state_machines(backend: BackendResult, java_files: list[str], root: 
                     method_start = j
                     break
 
-            # 方法内向上找最近的含状态字面量的 if 守卫（且其后有 throw）
+            # 方法内向上找最近的含状态字面量的 if 守卫（其后必须显式离开当前流程）
             guard_text = None
             if method_name:
                 for j in range(i - 1, (method_start or 0) - 1, -1):
                     im = IF_RE.search(lines[j])
                     if im:
                         cond = im.group(1)
-                        # 只认含状态字面量且同一方法内存在 throw 的守卫
+                        # 只认含状态字面量且同一方法内存在 throw/continue/return/break 的守卫
                         if _extract_status_literals(cond):
-                            # 在守卫到写入点之间确认有 throw
                             seg = "\n".join(lines[j:i])
-                            if THROW_RE.search(seg):
+                            if GUARD_EXIT_RE.search(seg):
                                 guard_text = cond.strip()
                                 break
 

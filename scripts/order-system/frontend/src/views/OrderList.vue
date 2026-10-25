@@ -25,6 +25,21 @@
             />
           </el-select>
         </el-form-item>
+        <el-form-item label="金额区间">
+          <el-input
+            v-model="query.minAmount"
+            placeholder="最低金额"
+            clearable
+            style="width: 110px"
+          />
+          <span class="range-sep">-</span>
+          <el-input
+            v-model="query.maxAmount"
+            placeholder="最高金额"
+            clearable
+            style="width: 110px"
+          />
+        </el-form-item>
         <el-form-item>
           <el-button type="primary" @click="handleSearch">查询</el-button>
           <el-button @click="handleReset">重置</el-button>
@@ -35,10 +50,30 @@
     <el-card shadow="never">
       <div class="toolbar">
         <span class="total">共 {{ total }} 条订单</span>
-        <el-button type="primary" @click="goCreate">新建订单</el-button>
+        <div class="toolbar-actions">
+          <span class="batch-hint">批量取消仅处理待支付订单</span>
+          <el-button
+            type="danger"
+            plain
+            :disabled="!selectedIds.length"
+            :loading="batchCancelling"
+            @click="handleBatchCancel"
+          >
+            批量取消{{ selectedIds.length ? `(${selectedIds.length})` : '' }}
+          </el-button>
+          <el-button type="primary" @click="goCreate">新建订单</el-button>
+        </div>
       </div>
 
-      <el-table :data="orders" v-loading="loading" border stripe style="width: 100%">
+      <el-table
+        :data="orders"
+        v-loading="loading"
+        border
+        stripe
+        style="width: 100%"
+        @selection-change="onSelectionChange"
+      >
+        <el-table-column type="selection" width="45" />
         <el-table-column prop="orderNo" label="订单号" min-width="170" />
         <el-table-column prop="receiverName" label="收货人" width="110" />
         <el-table-column prop="phone" label="手机号" width="130" />
@@ -111,6 +146,7 @@ import { onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import {
+  batchCancelOrders,
   cancelOrder,
   completeOrder,
   fetchOrders,
@@ -126,12 +162,16 @@ const loading = ref(false)
 const orders = ref([])
 const total = ref(0)
 const statusOptions = ref([])
+const selectedIds = ref([])
+const batchCancelling = ref(false)
 
 const query = reactive({
   page: 1,
   pageSize: 10,
   keyword: '',
-  status: ''
+  status: '',
+  minAmount: '',
+  maxAmount: ''
 })
 
 const tagType = (status) => {
@@ -155,7 +195,9 @@ const loadOrders = async () => {
       page: query.page,
       pageSize: query.pageSize,
       keyword: query.keyword || undefined,
-      status: query.status || undefined
+      status: query.status || undefined,
+      minAmount: query.minAmount || undefined,
+      maxAmount: query.maxAmount || undefined
     })
     orders.value = res.data.items || []
     total.value = res.data.total || 0
@@ -173,7 +215,34 @@ const handleReset = () => {
   query.page = 1
   query.keyword = ''
   query.status = ''
+  query.minAmount = ''
+  query.maxAmount = ''
   loadOrders()
+}
+
+const onSelectionChange = (rows) => {
+  selectedIds.value = rows.map((row) => row.id)
+}
+
+const handleBatchCancel = async () => {
+  if (!selectedIds.value.length) {
+    ElMessage.warning('请先选择订单')
+    return
+  }
+  batchCancelling.value = true
+  try {
+    const res = await batchCancelOrders(selectedIds.value)
+    const data = res.data || {}
+    if (data.failed) {
+      ElMessage.warning(`批量取消完成：成功 ${data.cancelled} 条，失败 ${data.failed} 条`)
+    } else {
+      ElMessage.success(`批量取消完成：成功 ${data.cancelled} 条`)
+    }
+    selectedIds.value = []
+    await loadOrders()
+  } finally {
+    batchCancelling.value = false
+  }
 }
 
 const goCreate = () => router.push('/orders/create')
@@ -223,6 +292,21 @@ onMounted(async () => {
   align-items: center;
   justify-content: space-between;
   margin-bottom: 16px;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.batch-hint {
+  color: #909399;
+  font-size: 12px;
+}
+.range-sep {
+  margin: 0 6px;
+  color: #909399;
 }
 .total {
   color: #606266;

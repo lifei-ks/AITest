@@ -608,6 +608,294 @@ def _state_cases_for_points(machines: list[dict], frontend: FrontendResult) -> l
     return out
 
 
+FILTER_WORDS = ("筛选", "查询", "金额", "最低", "最高", "关键字", "订单状态", "重置")
+STATUS_LABELS = ("待支付", "已支付", "已发货", "已完成", "已取消", "已退款")
+
+
+def _is_list_page(page) -> bool:
+    return bool(page and "list" in (page.route or "").lower())
+
+
+def _is_stats_page(page) -> bool:
+    return bool(page and "statistics" in (page.route or "").lower())
+
+
+def _status_in_text(text: str) -> str:
+    for label in STATUS_LABELS:
+        if label in text:
+            return label
+    return ""
+
+
+def _append_status_filter(steps: list[dict], order: int, label: str) -> int:
+    # Element Plus 的 placeholder 是 span 文案，不在 input[placeholder] 上；
+    # 必须点 .el-select__wrapper 才会展开下拉，选项渲染在 body 的 popper 中。
+    steps.append(
+        _step(
+            order,
+            "ui_action",
+            "打开订单状态下拉框",
+            "订单状态",
+            "css",
+            '.el-select__wrapper:has(.el-select__placeholder:has-text("请选择订单状态"))',
+        )
+    )
+    order += 1
+    steps.append(
+        _step(
+            order,
+            "ui_action",
+            f"选择订单状态{label}",
+            label,
+            "css",
+            f'.el-select-dropdown__item:has-text("{label}")',
+        )
+    )
+    return order + 1
+
+
+def _filter_expected(point: dict, text: str) -> str:
+    expected = str(point.get("expected") or "")
+    for anchor in re.findall(r"「([^」]+)」", expected):
+        if any(word in anchor for word in ("不能", "格式", "不存在", "暂无", "失败", "超过", "必须")):
+            return anchor
+    code = re.search(r"ORD\d+", expected) or re.search(r"ORD\d+", text)
+    if code:
+        return code.group(0)
+    count = re.search(r"共\s*\d+\s*条订单", expected)
+    if count:
+        return count.group(0)
+    return "订单号"
+
+
+def _filter_point_case(point: dict, page, backend: BackendResult) -> GeneratedCase:
+    text = f"{point.get('title', '')} {point.get('description', '')} {point.get('expected', '')}"
+    steps = [_open_step(page.route, page.name, 1)]
+    order = 2
+    test_data = {}
+    min_value = max_value = ""
+    if "非数字" in text:
+        min_value = "abc"
+    elif "负" in text:
+        if "最低" in text:
+            min_value = "-1"
+        if "最高" in text:
+            max_value = "-1"
+    else:
+        equal = re.search(r"最低.{0,6}最高.{0,6}均填\s*(\d+(?:\.\d+)?)", text)
+        pair = re.search(
+            r"最低.{0,6}?(\d+(?:\.\d+)?).{0,10}?最高.{0,6}?(\d+(?:\.\d+)?)", text
+        )
+        min_only = re.search(r"最低(?:金额)?(?:填|输入|为)?\s*(\d+(?:\.\d+)?)", text)
+        max_only = re.search(r"最高(?:金额)?(?:填|输入|为)?\s*(\d+(?:\.\d+)?)", text)
+        if equal:
+            min_value = max_value = equal.group(1)
+        elif pair:
+            min_value, max_value = pair.group(1), pair.group(2)
+        elif "组合" in text:
+            # 测试点没给具体值：用一组能覆盖“金额+状态”组合的代表值
+            min_value = min_only.group(1) if min_only else "100"
+        elif "重置" in text and not min_only and not max_only:
+            # 先设置一组金额条件，再验证重置能清空
+            min_value, max_value = "100", "200"
+        else:
+            if min_only:
+                min_value = min_only.group(1)
+            if max_only:
+                max_value = max_only.group(1)
+
+    if min_value:
+        steps.append(_step(order, "input", "输入最低金额", "最低金额", "placeholder", "最低金额", input_value=min_value))
+        test_data["最低金额"] = min_value
+        order += 1
+    if max_value:
+        steps.append(_step(order, "input", "输入最高金额", "最高金额", "placeholder", "最高金额", input_value=max_value))
+        test_data["最高金额"] = max_value
+        order += 1
+    status = _status_in_text(text)
+    if not status and "组合" in text and "状态" in text:
+        status = "已支付"
+    if status and "订单状态" in text:
+        order = _append_status_filter(steps, order, status)
+        test_data["订单状态"] = status
+    if "关键字" in text:
+        code = re.search(r"ORD\d+", text)
+        value = "ORD99999999" if "不存在" in text else (code.group(0) if code else "ORD20260101001")
+        steps.append(_step(order, "input", "输入关键字", "关键字", "placeholder", "请输入订单号或收货人", input_value=value))
+        test_data["关键字"] = value
+        order += 1
+
+    action = "重置" if "重置" in text else "查询"
+    steps.append(_submit_step(order, action))
+    order += 1
+    expected = _filter_expected(point, text)
+    steps.append(_assert_expected(order, expected))
+    return GeneratedCase(
+        title=(point.get("title") or "订单列表筛选")[:255],
+        module=_point_module(point, page, backend),
+        type=_POINT_TYPE.get(point.get("category", "functional"), "positive"),
+        priority=point.get("priority") or "P1",
+        preconditions=[f"已进入{page.name}页面"],
+        steps=[s["action"] for s in steps],
+        expected_results=[expected],
+        structured_steps=steps,
+        test_data=test_data,
+        coverage_refs={"endpointIds": [], "transitionIds": [], "ruleIds": [], "testPointIds": [point.get("id")]},
+        test_point_id=point.get("id"),
+    )
+
+
+def _stats_capture_step(order: int, action: str, target: str, pattern: str, variable: str) -> dict:
+    return {
+        "order": order,
+        "type": "capture",
+        "action": action,
+        "target": target,
+        "uiSelector": {"type": "text", "value": target},
+        "expected": "",
+        "inputValue": "",
+        "variable": variable,
+        "pattern": pattern,
+    }
+
+
+def _stats_point_case(point: dict, page, backend: BackendResult) -> GeneratedCase:
+    text = f"{point.get('title', '')} {point.get('description', '')} {point.get('expected', '')}"
+    steps = [_open_step(page.route, page.name, 1)]
+    expected: list[str] = []
+    order = 2
+    if "六项" in text or "状态分布" in text:
+        # 六个状态标签逐个断言，避免只验证“状态分布”标题就判过
+        for label in STATUS_LABELS:
+            steps.append(_assert_expected(order, label))
+            expected.append(label)
+            order += 1
+    elif "小数" in text:
+        # 金额必须严格是两位小数；capture 匹配失败会让用例真实失败
+        steps.append(_stats_capture_step(
+            order, "读取订单总额格式", "订单总额", r"订单总额\s*[¥￥]?\s*(\d+\.\d{2})", "total_amount"
+        ))
+        order += 1
+        steps.append(_assert_expected(order, "订单总额"))
+        expected.append("订单总额")
+        order += 1
+    elif "有效" in text:
+        steps.append(_stats_capture_step(
+            order, "读取有效订单金额", "有效订单金额",
+            r"有效订单金额[^\n]*\s*[¥￥]?\s*(\d+\.\d{2})", "valid_amount",
+        ))
+        order += 1
+        steps.append(_assert_expected(order, "不含已取消、已退款"))
+        expected.append("不含已取消、已退款")
+        order += 1
+    elif "总数" in text or "数量" in text or "统计" in text:
+        steps.append(_stats_capture_step(
+            order, "读取订单总数", "订单总数", r"订单总数\s*(\d+)", "total_orders"
+        ))
+        order += 1
+        steps.append(_stats_capture_step(
+            order, "读取订单总额", "订单总额", r"订单总额\s*[¥￥]?\s*(\d+\.\d{2})", "total_amount"
+        ))
+        order += 1
+        steps.append(_assert_expected(order, "订单总数"))
+        expected.append("订单总数")
+        order += 1
+    else:
+        if "平均" in text:
+            anchor = "平均金额"
+        elif "总额" in text:
+            anchor = "订单总额"
+        elif "刷新" in text:
+            anchor = "刷新统计"
+        else:
+            anchor = "订单统计"
+        steps.append(_assert_expected(order, anchor))
+        expected.append(anchor)
+        order += 1
+
+    needs_mutation = any(word in text for word in ("取消订单后", "新建订单后", "重置后"))
+    suffix = "（页面冒烟·需补充数据变更）" if needs_mutation else "（页面指标校验）"
+    return GeneratedCase(
+        title=f"{(point.get('title') or '订单统计')[:235]}{suffix}",
+        module=_point_module(point, page, backend),
+        type=_POINT_TYPE.get(point.get("category", "functional"), "positive"),
+        priority=point.get("priority") or "P1",
+        preconditions=[f"已进入{page.name}页面"],
+        steps=[s["action"] for s in steps],
+        expected_results=expected,
+        structured_steps=steps,
+        test_data={},
+        coverage_refs={"endpointIds": [], "transitionIds": [], "ruleIds": [], "testPointIds": [point.get("id")]},
+        test_point_id=point.get("id"),
+    )
+
+
+def _batch_cancel_point_case(point: dict, page, backend: BackendResult) -> GeneratedCase:
+    # 表格行勾选需要稳定的复选框选择器；当前执行器没有该能力，
+    # 规则兜底只验证批量取消入口和“仅处理待支付订单”的可见提示。
+    steps = [
+        _open_step(page.route, page.name, 1),
+        _assert_expected(2, "批量取消仅处理待支付订单"),
+    ]
+    return GeneratedCase(
+        title=f"{(point.get('title') or '批量取消')[:240]}（UI 入口冒烟）",
+        module=_point_module(point, page, backend),
+        type=_POINT_TYPE.get(point.get("category", "functional"), "positive"),
+        priority=point.get("priority") or "P1",
+        preconditions=[f"已进入{page.name}页面"],
+        steps=[s["action"] for s in steps],
+        expected_results=["批量取消仅处理待支付订单"],
+        structured_steps=steps,
+        test_data={},
+        coverage_refs={"endpointIds": [], "transitionIds": [], "ruleIds": [], "testPointIds": [point.get("id")]},
+        source="rule",
+        confidence=0.6,
+        test_point_id=point.get("id"),
+    )
+
+
+def _list_smoke_case(point: dict, page, backend: BackendResult) -> GeneratedCase:
+    steps = [
+        _open_step(page.route, page.name, 1),
+        _assert_expected(2, "订单号"),
+    ]
+    return GeneratedCase(
+        title=f"{(point.get('title') or '订单列表')[:240]}（列表冒烟）",
+        module=_point_module(point, page, backend),
+        type=_POINT_TYPE.get(point.get("category", "functional"), "positive"),
+        priority=point.get("priority") or "P1",
+        preconditions=[f"已进入{page.name}页面"],
+        steps=[s["action"] for s in steps],
+        expected_results=["订单号"],
+        structured_steps=steps,
+        test_data={},
+        coverage_refs={"endpointIds": [], "transitionIds": [], "ruleIds": [], "testPointIds": [point.get("id")]},
+        source="rule",
+        confidence=0.5,
+        test_point_id=point.get("id"),
+    )
+
+
+def _match_state_case(state_cases, text: str):
+    """按最长触发词匹配状态流转，并先剔除“待支付/已支付”等状态标签。
+
+    否则触发词“支付”会误命中测试点标题里的“待支付”，把批量取消场景
+    错误替换成“执行支付”的状态用例。
+    """
+    cleaned = text
+    for label in sorted(STATUS_LABELS, key=len, reverse=True):
+        cleaned = cleaned.replace(label, "")
+    matched = None
+    matched_len = 0
+    for sm, sc in state_cases:
+        for t in sm.get("transitions", []):
+            trigger = str(t.get("trigger") or "")
+            if len(trigger) > matched_len and trigger in cleaned and trigger in sc.title:
+                matched = sc
+                matched_len = len(trigger)
+    return matched
+
+
 def generate_rule_cases_for_points(
     points: list[dict],
     backend: BackendResult,
@@ -631,17 +919,37 @@ def generate_rule_cases_for_points(
         # 测试点名里明确提到的字段优先（如「手机号格式不正确」→ 只针对 phone）
         mentioned = [f for f in fields if (f.label and f.label in text) or (f.prop and f.prop in text)]
 
-        # ---- 状态流转：优先复用状态机 BFS 用例，断言换成测试点预期 ----
+        point_text = f"{point.get('title', '')} {point.get('description', '')} {point.get('expected', '')}"
+        endpoint = str(point.get("endpoint") or "")
+
+        # ---- 统计页：只验证稳定指标/页面文案，不能套用表单提交 ----
+        if _is_stats_page(page):
+            cases.append(_stats_point_case(point, page, backend))
+            continue
+
+        # ---- 批量取消：当前不伪造表格勾选/API 注入步骤 ----
+        if "batch-cancel" in endpoint or "批量取消" in point_text or "勾选" in point_text:
+            target_page = page if _is_list_page(page) else next(
+                (p for p in frontend.pages if _is_list_page(p) and p.route), None
+            )
+            if target_page is not None:
+                cases.append(_batch_cancel_point_case(point, target_page, backend))
+                continue
+
+        # ---- 列表筛选：查询/重置 + 金额/状态/关键字，不再生成“提交” ----
+        if _is_list_page(page):
+            is_filter = any(word in point_text for word in FILTER_WORDS) and (
+                endpoint in ("", "GET /api/orders") or "重置" in point_text
+            )
+            if is_filter:
+                cases.append(_filter_point_case(point, page, backend))
+            else:
+                cases.append(_list_smoke_case(point, page, backend))
+            continue
+
+        # ---- 状态流转：复用状态机 BFS 用例，断言换成测试点预期 ----
         if category == "state" and state_cases:
-            matched = None
-            for _sm, sc in state_cases:
-                for t in _sm.get("transitions", []):
-                    trigger = t.get("trigger") or ""
-                    if trigger and trigger in text and trigger in sc.title:
-                        matched = sc
-                        break
-                if matched:
-                    break
+            matched = _match_state_case(state_cases, text)
             if matched is not None:
                 cases.append(_finish_point_case(copy.deepcopy(matched), point, page, backend))
                 continue

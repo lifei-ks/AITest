@@ -62,3 +62,46 @@ def test_bfs_shortest_path():
     # 支付→发货→完成 的最短推进路径
     assert paths.get("COMPLETED") == ["CREATED", "PAID", "SHIPPED", "COMPLETED"]
     assert paths.get("PAID") == ["CREATED", "PAID"]
+
+
+def test_not_equal_guard_uses_single_source_state(tmp_path):
+    """批量动作里的 status != CREATED 是否定守卫，不能推导成其余全部状态。"""
+    enum_file = tmp_path / "OrderStatus.java"
+    nl = chr(10)
+    enum_file.write_text(
+        nl.join([
+            "public enum OrderStatus {",
+            "    CREATED,",
+            "    PAID,",
+            "    SHIPPED,",
+            "    COMPLETED,",
+            "    CANCELLED,",
+            "    REFUNDED",
+            "}",
+        ]),
+        encoding="utf-8",
+    )
+    service_file = tmp_path / "OrderService.java"
+    service_file.write_text(
+        """
+public class OrderService {
+    public void batchCancel(List<Long> ids) {
+        for (Long id : ids) {
+            Order order = new Order();
+            if (order.getStatus() != OrderStatus.CREATED) {
+                continue;
+            }
+            order.setStatus(OrderStatus.CANCELLED);
+        }
+    }
+}
+""",
+        encoding="utf-8",
+    )
+    backend = analyze_backend([str(enum_file), str(service_file)], str(tmp_path))
+    machines = extract_state_machines(backend, [str(service_file)], str(tmp_path))
+    assert machines
+    transitions = machines[0].transitions
+    assert len(transitions) == 1
+    assert transitions[0].from_ == "CREATED"
+    assert transitions[0].to == "CANCELLED"

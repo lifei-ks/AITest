@@ -1,11 +1,13 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import OrderList from '../views/OrderList.vue'
 import OrderCreate from '../views/OrderCreate.vue'
+import OrderStatistics from '../views/OrderStatistics.vue'
 
 const routes = [
   { path: '/', redirect: '/orders/list' },
   { path: '/orders/list', name: 'OrderList', component: OrderList, meta: { title: '订单列表' } },
-  { path: '/orders/create', name: 'OrderCreate', component: OrderCreate, meta: { title: '新建订单' } }
+  { path: '/orders/create', name: 'OrderCreate', component: OrderCreate, meta: { title: '新建订单' } },
+  { path: '/orders/statistics', name: 'OrderStatistics', component: OrderStatistics, meta: { title: '订单统计' } }
 ]
 
 const router = createRouter({
