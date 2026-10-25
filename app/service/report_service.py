@@ -86,6 +86,27 @@ img{max-width:320px;border:1px solid #e4e7ed;margin:4px}
 <div style="margin:8px 0">{{ k }}：规划 {{ (v.plannedRate*100)|round(1) }}% / 执行 {{ (v.executedRate*100)|round(1) }}%（{{ v.executedCovered }}/{{ v.total }}）</div>
 <div class="bar"><i style="width:{{ (v.executedRate*100)|round(1) }}%"></i></div>
 {% endif %}{% endfor %}
+{% set ce = matrix.caseExecution %}
+<h2>执行成功矩阵</h2>
+<div style="margin:8px 0">
+  当前实时用例：{{ ce.total }} · 通过 {{ ce.passed }} · 失败 {{ ce.failed }} ·
+  待复核 {{ ce.needsReview }} · 未执行 {{ ce.notRun }} ·
+  通过率 {{ (ce.passRate*100)|round(1) }}%
+</div>
+<div style="margin:8px 0;color:#666">仅统计当前实时用例的最新执行状态；历史快照与已删除用例不计入。</div>
+<table>
+<thead><tr><th>模块</th><th>用例</th><th>通过</th><th>失败</th><th>待复核</th><th>未执行</th><th>通过率</th></tr></thead>
+<tbody>
+{% for m in ce.modules %}
+<tr>
+  <td>{{ m.module }}</td><td>{{ m.total }}</td><td>{{ m.passed }}</td>
+  <td>{{ m.failed }}</td><td>{{ m.needsReview }}</td><td>{{ m.notRun }}</td>
+  <td>{{ (m.passRate*100)|round(1) }}%</td>
+</tr>
+{% else %}
+<tr><td colspan="7">当前范围暂无实时用例</td></tr>
+{% endfor %}
+</tbody></table>
 <h2>用例明细</h2>
 {% for r in records %}
 <details>

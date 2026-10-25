@@ -12,6 +12,10 @@ from app.config import get_settings
 from app.entity.models import (
     CaseGeneration,
     CodeAnalysis,
+    RequirementCaseChange,
+    RequirementChange,
+    RequirementChangeRun,
+    RequirementSnapshot,
     ExecutionRecord,
     ExecutionStep,
     Mindmap,
@@ -112,6 +116,10 @@ def delete_project(session: Session, pid: str) -> None:
     session.execute(delete(StateMachine).where(StateMachine.project_id == pid))
     session.execute(delete(Mindmap).where(Mindmap.project_id == pid))
     session.execute(delete(CaseGeneration).where(CaseGeneration.project_id == pid))
+    session.execute(delete(RequirementCaseChange).where(RequirementCaseChange.project_id == pid))
+    session.execute(delete(RequirementChange).where(RequirementChange.project_id == pid))
+    session.execute(delete(RequirementChangeRun).where(RequirementChangeRun.project_id == pid))
+    session.execute(delete(RequirementSnapshot).where(RequirementSnapshot.project_id == pid))
     session.execute(delete(Project).where(Project.id == pid))
     logger.info("删除项目 %s（级联清理完成）", pid)
 

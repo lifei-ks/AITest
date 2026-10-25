@@ -305,9 +305,13 @@ def coverage_matrix(session: Session, pid: str, requirement_id: str | None = Non
             if transition_id in valid_transitions:
                 transition_cases.setdefault(transition_id, []).append(case.id)
 
+    current_case_ids = set(case_by_id)
     passed_stmt = select(ExecutionRecord).where(
         ExecutionRecord.project_id == pid,
         ExecutionRecord.status == "passed",
+        # 覆盖矩阵只反映当前实时用例：用例被新一轮生成替换后，旧执行记录
+        # 不能继续贡献“执行成功覆盖”。
+        ExecutionRecord.test_case_id.in_(current_case_ids or {"__none__"}),
     )
     if requirement_id:
         linked_ids = set(session.scalars(
@@ -387,11 +391,65 @@ def coverage_matrix(session: Session, pid: str, requirement_id: str | None = Non
             transition["plannedCaseIds"] = transition_cases.get(transition_id, [])
             transition["executed"] = transition_id in executed_transition
 
+    # 按模块的执行成功矩阵：只基于当前实时用例的最新执行状态。
+    status_counts: dict[str, int] = {}
+    module_stats: dict[str, dict] = {}
+    for case in cases:
+        status = case.execution_status or "not_run"
+        status_counts[status] = status_counts.get(status, 0) + 1
+        key = case.module or "未分组"
+        bucket = module_stats.setdefault(
+            key,
+            {
+                "module": key,
+                "total": 0,
+                "passed": 0,
+                "failed": 0,
+                "needsReview": 0,
+                "notRun": 0,
+                "other": 0,
+            },
+        )
+        bucket["total"] += 1
+        if status == "passed":
+            bucket["passed"] += 1
+        elif status == "failed":
+            bucket["failed"] += 1
+        elif status == "needs_review":
+            bucket["needsReview"] += 1
+        elif status == "not_run":
+            bucket["notRun"] += 1
+        else:
+            bucket["other"] += 1
+
+    modules = []
+    for bucket in sorted(module_stats.values(), key=lambda item: (-item["total"], item["module"])):
+        bucket["passRate"] = (
+            round(bucket["passed"] / bucket["total"], 4) if bucket["total"] else 0
+        )
+        modules.append(bucket)
+
+    passed_cases = status_counts.get("passed", 0)
+    case_execution = {
+        "total": len(cases),
+        "passed": passed_cases,
+        "failed": status_counts.get("failed", 0),
+        "needsReview": status_counts.get("needs_review", 0),
+        "notRun": status_counts.get("not_run", 0),
+        "running": status_counts.get("running", 0),
+        "skipped": status_counts.get("skipped", 0),
+        "cancelled": status_counts.get("cancelled", 0),
+        "passRate": round(passed_cases / len(cases), 4) if cases else 0,
+        "statusCounts": status_counts,
+        "modules": modules,
+        "note": "按当前实时用例的最新执行状态统计；历史快照与已删除用例不计入",
+    }
+
     return {
         "scope": {
             "projectId": pid,
             "requirementId": requirement_id,
-            "executionBasis": "只统计 status=passed 的执行记录",
+            "executionBasis": "只统计 status=passed 且属于当前实时用例的执行记录",
             "snapshotBased": True,
         },
         "scoped": {
@@ -410,5 +468,6 @@ def coverage_matrix(session: Session, pid: str, requirement_id: str | None = Non
         "businessRule": block(
             len(rules), planned_rule, executed_rule, rule_uncovered
         ),
+        "caseExecution": case_execution,
         "stateMachines": machine_specs,
     }

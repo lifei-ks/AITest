@@ -11,7 +11,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, Float, Index, Integer, String, Text
+from sqlalchemy import DateTime, Float, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -510,4 +510,131 @@ class CaseGeneration(Base):
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     # JSON: 轻量用例快照（标题/类型/优先级/预期/来源/质量分/测试点）
     snapshot: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+
+
+class RequirementSnapshot(Base):
+    """一次需求版本对应的接口/规则快照。
+
+    代码分析是项目级最新结果；增量对比必须保留“当时”的结构化事实，
+    因此这里按需求版本固化一份快照，而不是直接比较最新分析。
+    """
+
+    __tablename__ = "requirement_snapshots"
+    __table_args__ = (
+        Index("ix_requirement_snapshots_req", "requirement_id", "created_at"),
+        Index("ix_requirement_snapshots_project", "project_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    project_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    requirement_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    analysis_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    baseline_requirement_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    # code_analysis / manual
+    source: Mapped[str] = mapped_column(String(20), nullable=False, default="code_analysis")
+    # JSON: 规范化接口、参数、鉴权、关联规则
+    endpoints: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # JSON: 业务规则
+    rules: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # JSON: 状态流转
+    state_transitions: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # JSON: 公共鉴权配置摘要
+    security: Mapped[str | None] = mapped_column(Text, nullable=True)
+    warnings: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+
+
+class RequirementChangeRun(Base):
+    """一次增量变更分析/生成运行。"""
+
+    __tablename__ = "requirement_change_runs"
+    __table_args__ = (
+        Index("ix_change_runs_requirement", "requirement_id", "created_at"),
+        Index("ix_change_runs_baseline", "baseline_requirement_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    project_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    requirement_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    baseline_requirement_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    baseline_snapshot_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    current_snapshot_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    # analyzing / review / generating / completed / failed
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="analyzing")
+    mode: Mapped[str] = mapped_column(String(20), nullable=False, default="auto")
+    profile_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    # JSON: 接口/规则/用例/回归统计
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)
+
+
+class RequirementChange(Base):
+    """两个需求快照之间的一条结构化变更。"""
+
+    __tablename__ = "requirement_changes"
+    __table_args__ = (
+        Index("ix_requirement_changes_run", "run_id", "change_type"),
+        Index("ix_requirement_changes_key", "run_id", "entity_type", "match_key"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    run_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    project_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    requirement_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    baseline_requirement_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    # endpoint / business_rule / state_transition / permission / conflict
+    entity_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    # added / modified / deleted / unchanged / uncertain
+    change_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    match_key: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    old_ref: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    new_ref: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    old_data: Mapped[str | None] = mapped_column(Text, nullable=True)
+    new_data: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    requires_confirmation: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # auto / pending / confirmed / rejected
+    review_status: Mapped[str] = mapped_column(String(20), nullable=False, default="auto")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+
+
+class RequirementCaseChange(Base):
+    """增量运行中的用例去向：新增/更新/复用/待删除/缺失 + 回归推荐。"""
+
+    __tablename__ = "requirement_case_changes"
+    __table_args__ = (
+        Index("ix_requirement_case_changes_run", "run_id", "action"),
+        Index("ix_requirement_case_changes_target", "requirement_id", "dedupe_key"),
+        Index("ix_requirement_case_changes_baseline", "baseline_case_id"),
+        UniqueConstraint("run_id", "dedupe_key", name="uq_requirement_case_changes_dedupe"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    run_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    project_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    requirement_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    baseline_requirement_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    change_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    # 二期目标用例；missing 时为空
+    test_case_id: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
+    # 一期历史用例（更新/复用/待删除/回归推荐）
+    baseline_case_id: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
+    # created / updated / reused / pending_delete / missing
+    action: Mapped[str] = mapped_column(String(20), nullable=False)
+    # direct / indirect / none
+    regression_impact: Mapped[str] = mapped_column(String(20), nullable=False, default="none")
+    regression_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # suggested / accepted / rejected
+    regression_status: Mapped[str] = mapped_column(String(20), nullable=False, default="suggested")
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    # 跨运行幂等键：reuse:{caseId} / update:{caseId}:{point} / gen:{endpoint}:{point}
+    dedupe_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    # pending / auto / confirmed / rejected
+    review_status: Mapped[str] = mapped_column(String(20), nullable=False, default="auto")
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)

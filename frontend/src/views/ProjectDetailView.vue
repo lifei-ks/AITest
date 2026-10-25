@@ -67,6 +67,14 @@
           />
         </el-tab-pane>
 
+        <el-tab-pane label="增量分析" name="incremental" lazy>
+          <IncrementalTab
+            v-model:requirement-id="activeRequirementId"
+            :project-id="project.id"
+            :refresh-key="incrementalKey"
+          />
+        </el-tab-pane>
+
         <el-tab-pane label="用例生成" name="generate" lazy>
           <GenerationTab
             v-model:requirement-id="activeRequirementId"
@@ -79,6 +87,14 @@
 
         <el-tab-pane label="测试用例" name="testcases" lazy>
           <TestcasesView :project-id="project.id" :refresh-key="caseRefreshKey" />
+        </el-tab-pane>
+
+        <el-tab-pane label="覆盖矩阵" name="coverage" lazy>
+          <CoverageTab
+            v-model:requirement-id="activeRequirementId"
+            :project-id="project.id"
+            :refresh-key="coverageKey"
+          />
         </el-tab-pane>
 
         <el-tab-pane label="脑图" name="mindmap" lazy>
@@ -103,8 +119,10 @@ import { useRoute, useRouter } from 'vue-router'
 import { getProject } from '../api/projects'
 import { useConfigStore } from '../stores/config'
 import AnalysisTab from '../components/AnalysisTab.vue'
+import CoverageTab from '../components/CoverageTab.vue'
 import ExecutionsTab from '../components/ExecutionsTab.vue'
 import GenerationTab from '../components/GenerationTab.vue'
+import IncrementalTab from '../components/IncrementalTab.vue'
 import RequirementsTab from '../components/RequirementsTab.vue'
 import TestcasesView from './TestcasesView.vue'
 
@@ -115,13 +133,15 @@ const route = useRoute()
 const router = useRouter()
 const store = useConfigStore()
 const project = ref(null)
-const TABS = ['overview', 'analysis', 'requirements', 'generate', 'testcases', 'mindmap', 'executions']
+const TABS = ['overview', 'analysis', 'requirements', 'incremental', 'generate', 'testcases', 'coverage', 'mindmap', 'executions']
 const tab = ref(TABS.includes(route.query.tab) ? route.query.tab : 'overview')
 const loading = ref(false)
 const error = ref('')
 const activeRequirementId = ref(null)
 const caseRefreshKey = ref(0)
 const generationKey = ref(0)
+const incrementalKey = ref(0)
+const coverageKey = ref(0)
 const mindmapKey = ref(0)
 
 const STATUS_TEXT = { pending: '待分析', running: '分析中', success: '分析完成', failed: '分析失败' }
@@ -153,8 +173,10 @@ function onGenerate(requirementId) {
 }
 
 function onGenerated() {
-  // 生成完成后让已挂载的用例列表自动刷新
+  // 生成完成后让已挂载的用例列表和覆盖矩阵自动刷新
   caseRefreshKey.value += 1
+  coverageKey.value += 1
+  incrementalKey.value += 1
 }
 
 function onTabChange(name) {
@@ -162,7 +184,9 @@ function onTabChange(name) {
   router.replace({ query: { ...route.query, tab: name } })
   // 标签页是懒加载且常驻内存：每次进入时刷新，避免看到旧数据
   if (name === 'generate') generationKey.value += 1
+  else if (name === 'incremental') incrementalKey.value += 1
   else if (name === 'testcases') caseRefreshKey.value += 1
+  else if (name === 'coverage') coverageKey.value += 1
   else if (name === 'mindmap') mindmapKey.value += 1
 }
 

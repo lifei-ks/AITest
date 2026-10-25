@@ -29,6 +29,10 @@ from app.entity.models import (
     Project,
     Requirement,
     RequirementCase,
+    RequirementCaseChange,
+    RequirementChange,
+    RequirementChangeRun,
+    RequirementSnapshot,
     TestCase,
     TestCaseVersion,
     TestPoint,
@@ -269,6 +273,10 @@ def delete_requirement(session: Session, rid: str) -> None:
         session.query(RequirementCase).filter(RequirementCase.requirement_id == rid).delete(synchronize_session=False)
     session.query(TestPoint).filter(TestPoint.requirement_id == rid).delete(synchronize_session=False)
     session.query(CaseGeneration).filter(CaseGeneration.requirement_id == rid).delete(synchronize_session=False)
+    session.query(RequirementCaseChange).filter(RequirementCaseChange.requirement_id == rid).delete(synchronize_session=False)
+    session.query(RequirementChange).filter(RequirementChange.requirement_id == rid).delete(synchronize_session=False)
+    session.query(RequirementChangeRun).filter(RequirementChangeRun.requirement_id == rid).delete(synchronize_session=False)
+    session.query(RequirementSnapshot).filter(RequirementSnapshot.requirement_id == rid).delete(synchronize_session=False)
     session.delete(req)
     # 删除是破坏性操作：显式提交，避免依赖请求结束后的隐式提交导致前端刷新读到旧数据
     session.commit()

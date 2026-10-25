@@ -13,6 +13,9 @@ class Endpoint:
     methodName: str
     file: str
     line: int
+    # 增量对比用的方法参数与鉴权注解（旧分析结果没有这两个字段时默认为空）
+    params: list[dict] = field(default_factory=list)
+    auth: list[str] = field(default_factory=list)
 
 
 @dataclass

@@ -15,6 +15,7 @@ from app.routers import (
     analysis,
     executions,
     generation,
+    incremental,
     mindmap,
     projects,
     requirements,
@@ -78,6 +79,7 @@ app.include_router(projects.router)
 app.include_router(requirements.router)
 app.include_router(analysis.router)
 app.include_router(generation.router)
+app.include_router(incremental.router)
 app.include_router(testcases.router)
 app.include_router(executions.router)
 app.include_router(mindmap.router)

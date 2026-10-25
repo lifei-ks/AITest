@@ -30,6 +30,18 @@ CLASS_DECL_RE = re.compile(r"\b(class|interface|enum)\s+(\w+)")
 METHOD_DECL_RE = re.compile(r"\b(public|private|protected)\s+[A-Za-z_<>,\.\[\]\s]+\s+(\w+)\s*\(")
 FIELD_DECL_RE = re.compile(r"\bprivate\s+([A-Za-z_<>,\[\]\.\s]+?)\s+(\w+)\s*;")
 THROW_RE = re.compile(r"throw\s+new\s+\w+\s*\(\s*\"([^\"]*)\"\s*\)")
+AUTH_ANNOTATION_RE = re.compile(r"@(PreAuthorize|Secured|RolesAllowed|PermitAll|DenyAll)\s*(\([^)]*\))?")
+PARAM_ANNOTATION_RE = re.compile(r"@(\w+)\s*(?:\(([^)]*)\))?")
+PARAM_CONSTRAINT_NAMES = {
+    "notblank", "notnull", "notempty", "size", "max", "min", "pattern",
+    "email", "decimalmin", "decimalmax", "digits", "positive", "positiveorzero",
+    "negative", "negativeorzero", "length",
+}
+SIMPLE_PARAM_TYPES = {
+    "string", "int", "integer", "long", "short", "byte", "float", "double",
+    "boolean", "char", "bigdecimal", "biginteger", "date", "localdate",
+    "localdatetime", "list", "set", "map", "object",
+}
 # 守卫：if (...) { throw ... }，取 if 括号内容
 IF_GUARD_RE = re.compile(r"\bif\s*\(([^{}]*)\)\s*(?:\{|throw)")
 
@@ -71,6 +83,133 @@ def _join_path(prefix: str | None, path: str | None) -> str:
     return ("/" + path.strip("/")).rstrip("/") or "/"
 
 
+def _method_signature(lines: list[str], start: int) -> str:
+    """拼接方法声明并截取括号内参数文本；最多看 12 行。"""
+    text = " ".join(lines[start : start + 12])
+    open_idx = text.find("(")
+    if open_idx < 0:
+        return ""
+    depth = 0
+    in_string = False
+    escaped = False
+    for idx in range(open_idx, len(text)):
+        ch = text[idx]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return text[open_idx + 1 : idx]
+    return text[open_idx + 1 :]
+
+
+def _split_params(text: str) -> list[str]:
+    """按顶层逗号拆分参数，忽略泛型、注解参数和字符串里的逗号。"""
+    out: list[str] = []
+    buf: list[str] = []
+    paren = angle = 0
+    in_string = False
+    escaped = False
+    for ch in text:
+        if in_string:
+            buf.append(ch)
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+            buf.append(ch)
+        elif ch == "(":
+            paren += 1
+            buf.append(ch)
+        elif ch == ")":
+            paren = max(0, paren - 1)
+            buf.append(ch)
+        elif ch == "<":
+            angle += 1
+            buf.append(ch)
+        elif ch == ">":
+            angle = max(0, angle - 1)
+            buf.append(ch)
+        elif ch == "," and paren == 0 and angle == 0:
+            item = "".join(buf).strip()
+            if item:
+                out.append(item)
+            buf = []
+        else:
+            buf.append(ch)
+    item = "".join(buf).strip()
+    if item:
+        out.append(item)
+    return out
+
+
+def _parse_method_params(signature: str) -> list[dict]:
+    params: list[dict] = []
+    for raw in _split_params(signature):
+        annotations = PARAM_ANNOTATION_RE.findall(raw)
+        ann_names = {name.lower(): args for name, args in annotations}
+        cleaned = PARAM_ANNOTATION_RE.sub(" ", raw)
+        tokens = [token for token in cleaned.split() if token]
+        if len(tokens) < 2:
+            continue
+        param_type = tokens[-2].split("<")[0].strip()
+        param_name = tokens[-1]
+        if not param_name or not param_type:
+            continue
+        if "requestbody" in ann_names:
+            source = "request_body"
+        elif "pathvariable" in ann_names:
+            source = "path_variable"
+        elif "requestparam" in ann_names:
+            source = "request_param"
+        else:
+            source = "unknown"
+        args_text = " ".join(str(args or "") for args in ann_names.values()).replace(" ", "").lower()
+        required = (
+            source in ("request_body", "path_variable")
+            or any(name in ann_names for name in ("notblank", "notnull", "notempty"))
+            or (source == "request_param" and "required=false" not in args_text)
+        )
+        constraints = []
+        for name, args in annotations:
+            if name.lower() in PARAM_CONSTRAINT_NAMES:
+                constraints.append(f"{name}({args})" if args else name)
+        params.append({
+            "name": param_name,
+            "type": param_type,
+            "source": source,
+            "required": required,
+            "constraints": constraints,
+            "dtoType": param_type if param_type[:1].isupper() and param_type.lower() not in SIMPLE_PARAM_TYPES else "",
+        })
+    return params
+
+
+def _method_auth(lines: list[str], mapping_idx: int, method_idx: int) -> list[str]:
+    auth: list[str] = []
+    for idx in range(max(0, mapping_idx - 3), min(len(lines), method_idx + 1)):
+        for name, args in AUTH_ANNOTATION_RE.findall(lines[idx]):
+            text = f"@{name}{args or ''}"
+            if text not in auth:
+                auth.append(text)
+    return auth
+
+
 def parse_java_file(path: str, rel: str) -> BackendResult:
     """解析单个 .java 文件，返回累积到结果（单文件粒度便于并行/测试）。"""
     result = BackendResult()
@@ -108,10 +247,12 @@ def parse_java_file(path: str, rel: str) -> BackendResult:
         path = _extract_path_value(mm.group(2)) if mm.group(2) else ""
         # 找本行及后续几行里的方法名
         method_name = None
+        method_idx = i
         for j in range(i, min(i + 5, len(lines))):
             dm = METHOD_DECL_RE.search(lines[j])
             if dm:
                 method_name = dm.group(2)
+                method_idx = j
                 break
         if not method_name:
             continue
@@ -125,6 +266,8 @@ def parse_java_file(path: str, rel: str) -> BackendResult:
                 methodName=method_name,
                 file=rel,
                 line=i + 1,
+                params=_parse_method_params(_method_signature(lines, method_idx)),
+                auth=_method_auth(lines, i, method_idx),
             )
         )
 

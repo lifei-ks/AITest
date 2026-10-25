@@ -106,6 +106,7 @@ def test_coverage_matrix_uses_passed_snapshot_and_requirement_scope():
                 {"id": "ep-current", "method": "POST", "path": "/current", "methodName": "create"},
                 {"id": "ep-snapshot", "method": "POST", "path": "/snapshot", "methodName": "create"},
                 {"id": "ep-failed", "method": "POST", "path": "/failed", "methodName": "create"},
+                {"id": "ep-stale", "method": "POST", "path": "/stale", "methodName": "create"},
             ],
             "businessRules": [],
         }
@@ -171,26 +172,41 @@ def test_coverage_matrix_uses_passed_snapshot_and_requirement_scope():
             }),
             status="failed",
         )
-        session.add_all([passed, failed])
-        session.flush()
-        session.add(ExecutionRequirement(
-            execution_id=passed.id,
+        # 已删除/被新版本替换的旧用例，即使有 passed 执行，也不能计入当前覆盖
+        stale = ExecutionRecord(
+            id="EX-COV-STALE",
             project_id=project.id,
-            requirement_id=requirement.id,
-            requirement_version=requirement.version,
-            requirement_name=requirement.name,
-        ))
+            test_case_id="TC-ALREADY-DELETED",
+            test_case_title="已删除用例",
+            test_case_snapshot=json.dumps({
+                "coverageRefs": {"endpointIds": ["ep-stale"]},
+            }),
+            status="passed",
+        )
+        session.add_all([passed, failed, stale])
+        session.flush()
+        for record in (passed, stale):
+            session.add(ExecutionRequirement(
+                execution_id=record.id,
+                project_id=project.id,
+                requirement_id=requirement.id,
+                requirement_version=requirement.version,
+                requirement_name=requirement.name,
+            ))
         session.flush()
 
         project_matrix = coverage_matrix(session, project.id)
         requirement_matrix = coverage_matrix(session, project.id, requirement.id)
 
-    # 规划读取当前用例；执行覆盖读取执行瞬间快照，且不统计 failed。
+    # 规划读取当前用例；执行覆盖读取执行瞬间快照，且不统计 failed / 已删除用例。
     assert project_matrix["apiEndpoint"]["plannedCovered"] == 1
     assert project_matrix["apiEndpoint"]["executedCovered"] == 1
     assert {item["id"] for item in project_matrix["apiEndpoint"]["uncovered"]} == {
-        "ep-snapshot", "ep-failed"
+        "ep-snapshot", "ep-failed", "ep-stale"
     }
+    assert project_matrix["caseExecution"]["total"] == 1
+    assert project_matrix["caseExecution"]["passed"] == 1
+    assert project_matrix["caseExecution"]["modules"][0]["module"] == "订单"
     assert requirement_matrix["scoped"]["cases"] == 1
     assert requirement_matrix["scoped"]["passedExecutions"] == 1
     assert requirement_matrix["apiEndpoint"]["executedCovered"] == 1
