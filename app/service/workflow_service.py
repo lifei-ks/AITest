@@ -29,7 +29,7 @@ from app.agent.count_assertion import normalize_case_counts
 from app.agent.quality_gate import (
     case_has_compound_expected,
     case_has_multiple_inputs,
-    score_case,
+    score_case_detailed,
 )
 from app.common.errors import BizError
 from app.common.execution_enums import execution_status_meta
@@ -860,6 +860,7 @@ def _counts(values) -> dict[str, int]:
 def _case_proxy(case: dict, test_point_id: str | None = None) -> SimpleNamespace:
     return SimpleNamespace(
         title=case.get("title") or "",
+        type=case.get("type") or "",
         structured_steps=case.get("structuredSteps") or [],
         expected_results=generation_service._as_text_list(case.get("expectedResults")),
         coverage_refs=case.get("coverageRefs") or {},
@@ -867,17 +868,61 @@ def _case_proxy(case: dict, test_point_id: str | None = None) -> SimpleNamespace
     )
 
 
-def _required_fields(facts: dict) -> list[dict]:
+def _normalize_route(route: str | None) -> str:
+    value = (route or "").strip().rstrip("/")
+    return value or "/"
+
+
+def _required_fields(facts: dict, route: str | None = None) -> list[dict]:
+    """按页面路由收集必填字段；路由为空时不做全项目强制。"""
+    wanted = _normalize_route(route) if route else ""
+    if not wanted:
+        return []
     out: list[dict] = []
     for page in facts.get("pages") or []:
-        for form in page.get("forms") or []:
+        if _normalize_route(page.get("route")) != wanted:
+            continue
+        forms = page.get("forms") or []
+        if not forms and page.get("fields"):
+            out.extend(
+                field for field in page.get("fields") or []
+                if isinstance(field, dict) and field.get("required")
+            )
+            continue
+        for form in forms:
             for field in form.get("fields") or []:
                 if field.get("required"):
                     out.append(field)
     return out
 
 
+def _case_route(case: dict) -> str:
+    for step in case.get("structuredSteps") or []:
+        selector = step.get("uiSelector") or {}
+        if selector.get("type") == "route":
+            return str(selector.get("value") or "")
+    return ""
+
+
+def _looks_like_form_submit(case: dict) -> bool:
+    steps = case.get("structuredSteps") or []
+    words = ("提交", "保存", "创建", "新增", "确认", "添加", "注册", "登录")
+    return any(
+        any(word in f"{step.get('action') or ''} {step.get('target') or ''}" for word in words)
+        for step in steps
+    )
+
+
 def _missing_required_fields(case: dict, facts: dict) -> list[str]:
+    # 反例/边界用例会故意留空或填非法值，必填完整性只对正向表单用例有意义。
+    case_type = str(case.get("type") or "").lower()
+    if case_type not in ("positive", "functional"):
+        return []
+    if not _looks_like_form_submit(case):
+        return []
+    route = _case_route(case)
+    if not route:
+        return []
     steps = case.get("structuredSteps") or []
     corpus_parts: list[str] = []
     for step in steps:
@@ -887,7 +932,7 @@ def _missing_required_fields(case: dict, facts: dict) -> list[str]:
         corpus_parts.append(f"{selector} {step.get('target') or ''} {step.get('action') or ''}")
     corpus = " ".join(corpus_parts)
     missing: list[str] = []
-    for field in _required_fields(facts):
+    for field in _required_fields(facts, route):
         tokens = [field.get("placeholder"), field.get("label"), field.get("prop")]
         if not any(token and str(token) in corpus for token in tokens):
             missing.append(str(field.get("label") or field.get("prop") or field.get("placeholder") or "必填字段"))
@@ -934,7 +979,11 @@ def _deterministic_review(
             fixable.append(message)
 
     all_issues = blocking + fixable + warnings
-    score = score_case(proxy, all_issues)
+    detailed = score_case_detailed(proxy, warnings=warnings)
+    score = detailed["score"]
+    # fixable 问题适度影响分数；warning 只展示，不参与扣分。
+    if fixable:
+        score = max(0, score - min(5 * len(fixable), 20))
     if blocking:
         score = min(score, 30)
     return {
@@ -942,6 +991,7 @@ def _deterministic_review(
         "fixable": fixable,
         "warnings": warnings,
         "qualityScore": score,
+        "qualityBreakdown": detailed,
         "issues": all_issues,
     }
 

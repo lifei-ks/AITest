@@ -38,11 +38,17 @@ def _build_facts(facts: dict) -> dict:
     }
 
 
-def review_case(client: LlmClient, case: dict, facts: dict) -> dict:
+def review_case(
+    client: LlmClient,
+    case: dict,
+    facts: dict,
+    deterministic: dict | None = None,
+) -> dict:
     """Review one generated case against requirement and source-derived facts."""
     payload = {
         "case": case,
         "requirementAndSourceFacts": _build_facts(facts),
+        "deterministicChecks": deterministic or {},
     }
     prompt = render_prompt(
         "case_review",
@@ -58,29 +64,7 @@ def parse_review(data) -> dict:
     verdict = str(data.get("verdict") or "").strip().lower()
     if verdict not in CASE_REVIEW_VERDICTS:
         verdict = CASE_REVIEW_SUSPECT
-    raw_issues = data.get("issues") if isinstance(data.get("issues"), list) else []
-    issues: list[dict] = []
-    seen: set[tuple[str, str]] = set()
-    for item in raw_issues[:12]:
-        if not isinstance(item, dict):
-            continue
-        problem = _compact(item.get("problem"), 1000)
-        if not problem:
-            continue
-        severity = str(item.get("severity") or "warning").lower()
-        if severity not in ("blocker", "warning", "info"):
-            severity = "warning"
-        key = (severity, problem)
-        if key in seen:
-            continue
-        seen.add(key)
-        issues.append({
-            "severity": severity,
-            "field": _compact(item.get("field"), 60) or "case",
-            "problem": problem,
-            "suggestion": _compact(item.get("suggestion"), 1000),
-            "evidence": _compact(item.get("evidence"), 500),
-        })
+    issues = _parse_issues(data.get("issues"))
     if verdict == CASE_REVIEW_OK and any(i["severity"] in ("blocker", "warning") for i in issues):
         verdict = CASE_REVIEW_SUSPECT
     if verdict != CASE_REVIEW_OK and not issues:
@@ -91,10 +75,37 @@ def parse_review(data) -> dict:
             "suggestion": "请人工检查后修复",
             "evidence": "",
         })
+    step_results: list[dict] = []
+    raw_steps = data.get("stepResults") or data.get("step_results") or []
+    for item in raw_steps[:20] if isinstance(raw_steps, list) else []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            index = int(item.get("stepIndex") or item.get("step_index") or 0)
+        except (TypeError, ValueError):
+            continue
+        if index <= 0:
+            continue
+        step_issues = _parse_issues(item.get("issues"))
+        if any(i["severity"] == "blocker" for i in step_issues):
+            step_verdict = "fail"
+        elif any(i["severity"] == "warning" for i in step_issues):
+            step_verdict = "warning"
+        else:
+            step_verdict = "pass"
+        step_results.append({
+            "stepIndex": index,
+            "stepType": _compact(item.get("stepType") or item.get("step_type"), 40),
+            "action": _compact(item.get("action"), 255),
+            "verdict": _compact(item.get("verdict"), 20) or step_verdict,
+            "checks": item.get("checks") if isinstance(item.get("checks"), list) else [],
+            "issues": step_issues,
+        })
     return {
         "verdict": verdict,
         "reason": _compact(data.get("reason"), 800) or ("用例通过 AI 质检" if verdict == CASE_REVIEW_OK else "AI 质检发现问题"),
         "issues": issues,
+        "stepResults": step_results,
     }
 
 
@@ -153,6 +164,7 @@ def _parse_issues(raw_issues) -> list[dict]:
         issues.append(
             {
                 "severity": severity,
+                "code": _compact(item.get("code"), 60),
                 "field": _compact(item.get("field"), 60) or "case",
                 "problem": problem,
                 "suggestion": _compact(item.get("suggestion"), 1000),

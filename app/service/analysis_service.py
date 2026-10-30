@@ -10,9 +10,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.agent.state_machine_agent import extract_state_machines
+from app.analyzer.ast_java import analyze_backend_ast
+from app.analyzer.ast_vue import analyze_frontend_ast
 from app.analyzer.scanner import list_by_ext, scan
 from app.analyzer.spring import analyze_backend
 from app.analyzer.vue import analyze_frontend
+from app.config import get_settings
 from app.database import SessionLocal
 from app.entity.models import CodeAnalysis, Project, StateMachine
 from app.analyzer.models import to_json_dict
@@ -73,13 +76,27 @@ def run_analysis(pid: str, analysis_id: str) -> None:
 
         if scan_result.backend == "java-spring":
             java = list_by_ext(scan_result, {".java"})
-            backend = analyze_backend(java, root)
+            if (get_settings().analyzer_engine or "ast").lower() == "ast":
+                try:
+                    backend = analyze_backend_ast(java, root)
+                except Exception as exc:  # noqa: BLE001 - AST 失败回退规则解析
+                    warnings.append(f"Java AST 解析失败，已回退规则解析：{exc}")
+                    backend = analyze_backend(java, root)
+            else:
+                backend = analyze_backend(java, root)
         else:
             warnings.append("未识别到 Spring Boot 后端（缺 pom.xml / build.gradle）")
 
         if scan_result.frontend == "vue":
             vue_js = list_by_ext(scan_result, {".vue", ".js"})
-            frontend = analyze_frontend(vue_js, root)
+            if (get_settings().analyzer_engine or "ast").lower() == "ast":
+                try:
+                    frontend = analyze_frontend_ast(vue_js, root)
+                except Exception as exc:  # noqa: BLE001 - AST 失败回退规则解析
+                    warnings.append(f"Vue AST 解析失败，已回退规则解析：{exc}")
+                    frontend = analyze_frontend(vue_js, root)
+            else:
+                frontend = analyze_frontend(vue_js, root)
         else:
             warnings.append("未识别到 Vue 前端（缺 package.json 或 .vue）")
 

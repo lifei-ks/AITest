@@ -75,6 +75,10 @@ class GeneratedCase:
     coverage_refs: dict = field(default_factory=dict)
     source: str = "rule"
     confidence: float = 1.0
+    quality_score: int = 100
+    lint_issues: list[str] = field(default_factory=list)
+    quality_breakdown: dict = field(default_factory=dict)
+    warnings: list[str] = field(default_factory=list)
     # 需求测试点来源（需求版本生成时写入）
     test_point_id: str | None = None
 

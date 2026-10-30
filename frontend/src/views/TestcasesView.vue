@@ -169,17 +169,17 @@
         <el-table-column v-if="!isNarrow && !isSnapshotView" label="AI 质检" width="104" align="center">
           <template #default="{ row }">
             <el-tooltip
-              v-if="caseReviewMap[row.id]"
-              :content="caseReviewMap[row.id].reason || reviewLabel(caseReviewMap[row.id].verdict)"
+              v-if="reviewOf(row)"
+              :content="reviewOf(row).reason || reviewLabel(reviewOf(row).verdict)"
               placement="top"
             >
               <el-tag
                 size="small"
-                :type="reviewTag(caseReviewMap[row.id].verdict)"
+                :type="reviewTag(reviewOf(row).verdict)"
                 class="review-link"
                 @click="openAiReviewDialog(row.id)"
               >
-                {{ reviewLabel(caseReviewMap[row.id].verdict) }}
+                {{ reviewLabel(reviewOf(row).verdict) }}
               </el-tag>
             </el-tooltip>
             <span v-else class="muted">—</span>
@@ -295,6 +295,26 @@
                 <div class="issue-problem">{{ issue.problem }}</div>
                 <div v-if="issue.suggestion" class="issue-suggestion">建议：{{ issue.suggestion }}</div>
                 <div v-if="issue.evidence" class="issue-evidence">依据：{{ issue.evidence }}</div>
+              </div>
+            </div>
+          </div>
+          <div v-if="result.stepResults?.length" class="step-review-block">
+            <div class="step-review-title">逐步检查</div>
+            <div v-for="step in result.stepResults" :key="step.stepIndex" class="step-review-item">
+              <div class="step-review-head">
+                <el-tag size="small" :type="stepTag(step.verdict)">第 {{ step.stepIndex }} 步</el-tag>
+                <span class="step-review-action">{{ step.action || step.stepType }}</span>
+                <span class="muted">{{ step.verdict }}</span>
+              </div>
+              <div v-for="(issue, index) in step.issues" :key="index" class="step-issue">
+                <el-tag size="small" :type="issueTag(issue.severity)">
+                  {{ issueLabel(issue.severity) }}
+                </el-tag>
+                <div class="issue-body">
+                  <div class="issue-problem">{{ issue.problem }}</div>
+                  <div v-if="issue.reason" class="issue-evidence">原因：{{ issue.reason }}</div>
+                  <div v-if="issue.evidence" class="issue-evidence">依据：{{ issue.evidence }}</div>
+                </div>
               </div>
             </div>
           </div>
@@ -679,6 +699,24 @@ const aiReviewSummaryType = computed(() => {
 function reviewTag(verdict) {
   return { ok: 'success', suspect: 'warning', fail: 'danger', unavailable: 'info' }[verdict] || 'info'
 }
+function reviewOf(row) {
+  if (!row) return null
+  if (caseReviewMap.value[row.id]) return caseReviewMap.value[row.id]
+  if (!row.lastReviewVerdict) return null
+  const stored = row.lastReviewIssues || {}
+  return {
+    caseId: row.id,
+    verdict: row.lastReviewVerdict,
+    reason: stored.reason || '',
+    issues: stored.issues || [],
+    stepResults: stored.stepResults || [],
+    qualityScore: row.lastReviewScore,
+    model: '',
+  }
+}
+function stepTag(verdict) {
+  return { pass: 'success', warning: 'warning', fail: 'danger' }[verdict] || 'info'
+}
 function reviewLabel(verdict) {
   return {
     ok: '通过',
@@ -742,7 +780,8 @@ async function onAiReview() {
 
 function openAiReviewDialog(caseId) {
   if (caseId && !aiReviewResults.value.some((result) => result.caseId === caseId)) {
-    const item = caseReviewMap.value[caseId]
+    const row = rows.value.find((item) => item.id === caseId)
+    const item = caseReviewMap.value[caseId] || reviewOf(row)
     if (item) aiReviewResults.value = [item]
   }
   aiReviewVisible.value = true
@@ -1247,6 +1286,36 @@ watch(() => props.refreshKey, async () => {
 .issue-evidence {
   margin-top: 4px;
   color: var(--el-text-color-secondary);
+}
+.step-review-block {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--el-border-color-lighter);
+}
+.step-review-title {
+  margin-bottom: 8px;
+  font-weight: 600;
+}
+.step-review-item {
+  padding: 8px 0;
+  border-bottom: 1px dashed var(--el-border-color-lighter);
+}
+.step-review-item:last-child {
+  border-bottom: none;
+}
+.step-review-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.step-review-action {
+  font-weight: 500;
+}
+.step-issue {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+  padding-left: 8px;
 }
 @media (max-width: 900px) {
   .page-layout {

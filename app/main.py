@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.common.errors import register_exception_handlers
 from app.common.response import ok
 from app.config import get_settings
-from app.database import Base, get_engine
+from app.database import Base, ensure_schema_compat, get_engine
 from app.routers import (
     analysis,
     executions,
@@ -34,6 +34,7 @@ logger = logging.getLogger("app.main")
 async def lifespan(_app: FastAPI):
     # 启动即建表（V2 起有模型后生效；幂等）
     Base.metadata.create_all(get_engine())
+    ensure_schema_compat(get_engine())
     # 后台线程不会跨进程存活：上次进程遗留的 running 运行必须显式标记失败
     from app.service import workflow_service
 

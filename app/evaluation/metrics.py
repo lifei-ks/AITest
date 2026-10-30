@@ -12,6 +12,8 @@ from __future__ import annotations
 import re
 from collections import Counter
 
+from app.agent.quality_gate import is_near_duplicate, scenario_signature
+
 QUOTE_ANCHOR_RE = re.compile(r"[「『“\"]([^」』”\"]+)[」』”\"]")
 VAGUE_ASSERT_WORDS = ("显示正常", "符合预期", "页面正常", "正常显示", "没问题", "功能正常")
 
@@ -90,24 +92,36 @@ def point_coverage(cases: list[dict], point_ids: list[str]) -> float | None:
 def duplicate_rate(cases: list[dict]) -> float | None:
     """重复用例率 = (用例数 - 去重后场景数) / 用例数。
 
-    指纹与质量闸一致：标题 + 全部步骤（动作/目标/输入/断言）+ 预期。
+    与质量闸使用同一结构化场景签名，避免指标与闸门口径不一致。
     """
     if not cases:
         return None
     seen: set[str] = set()
     duplicates = 0
     for case in cases:
-        steps = "".join(
-            str(step.get(key) or "")
-            for step in (case.get("structuredSteps") or [])
-            for key in ("action", "target", "inputValue", "expected")
-        )
-        fingerprint = re.sub(r"\s+", "", f"{case.get('title') or ''}{steps}{'|'.join(case.get('expectedResults') or [])}").lower()
-        if fingerprint in seen:
+        signature = scenario_signature(case)
+        if signature in seen:
             duplicates += 1
         else:
-            seen.add(fingerprint)
+            seen.add(signature)
     return round(duplicates / len(cases), 4)
+
+
+def near_duplicate_rate(cases: list[dict]) -> float | None:
+    """近似重复用例率：同路由、同步骤类型序列且相似度 > 0.98 的用例对占比。"""
+    if len(cases) < 2:
+        return None
+    pairs = 0
+    total = 0
+    for i in range(len(cases)):
+        signature_i = scenario_signature(cases[i])
+        for j in range(i + 1, len(cases)):
+            if signature_i == scenario_signature(cases[j]):
+                continue
+            total += 1
+            if is_near_duplicate(cases[i], cases[j]):
+                pairs += 1
+    return round(pairs / total, 4) if total else None
 
 
 def _anchors(case: dict) -> list[str]:
@@ -195,6 +209,7 @@ def evaluate_case_set(
         "requiredFieldScope": "positive_cases" if positive_cases else "all_cases",
         "pointCoverage": point_coverage(cases, [str(point["id"]) for point in points]),
         "duplicateRate": duplicate_rate(cases),
+        "nearDuplicateRate": near_duplicate_rate(cases),
         "verifiableExpectationRate": verifiable_expectation_rate(cases),
         "keyScenarioOmissionRate": omission["rate"],
         "keyScenarioMissing": omission["missing"],
@@ -207,6 +222,7 @@ def compare_metrics(baseline: dict, proposed: dict, lower_is_better: set[str] | 
     """逐指标给出绝对值差和百分比；baseline 为 0/None 时百分比为 None。"""
     lower_is_better = lower_is_better or {
         "duplicateRate",
+        "nearDuplicateRate",
         "keyScenarioOmissionRate",
     }
     out: dict[str, dict] = {}

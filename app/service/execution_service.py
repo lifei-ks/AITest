@@ -132,6 +132,13 @@ def review_to_dict(
     else:
         recommended_action = None
 
+    review_meta = {}
+    if review.review_meta:
+        try:
+            review_meta = json.loads(review.review_meta)
+        except (TypeError, ValueError):
+            review_meta = {}
+
     return {
         "verdict": review.verdict,
         "verdictLabel": verdict_meta["label"],
@@ -149,6 +156,7 @@ def review_to_dict(
         "reviewPoints": [item["problem"] for item in normalized_issues if item.get("problem")],
         "recommendedAction": recommended_action,
         "imageReviews": [_image_review_to_dict(i) for i in (images or [])],
+        "reviewMeta": review_meta,
     }
 
 
@@ -256,6 +264,15 @@ def _upsert_review(session: Session, execution_id: str, result: dict) -> Executi
     # 已废弃：不再采集模型自报的置信度（无校准依据、不参与判定），重审时显式清空旧值
     review.confidence = None
     review.image_count = result.get("imageCount") or 0
+    review.review_meta = json.dumps(
+        {
+            "reviewPasses": result.get("reviewPasses", 1),
+            "totalSteps": result.get("totalSteps"),
+            "reviewedSteps": result.get("reviewedSteps") or [],
+            "imageCoverage": result.get("imageCoverage"),
+        },
+        ensure_ascii=False,
+    )
     review.reviewer = "llm"
     review.reviewer_note = None
     review.reviewed_at = None
@@ -510,6 +527,7 @@ def execute_single(
                     step_type=s["stepType"], selector_used=s["selectorUsed"], result=s["result"],
                     screenshot_before=_rel_path(s["screenshotBefore"]), screenshot_after=_rel_path(s["screenshotAfter"]),
                     error=s["error"], duration_ms=0,
+                    evidence=json.dumps(s.get("evidence") or {}, ensure_ascii=False),
                 ))
 
             # 回写用例执行状态
@@ -589,19 +607,26 @@ def _steps_for_review(session: Session, eid: str) -> list[dict]:
             .order_by(ExecutionStep.step_index)
         )
     )
-    return [
-        {
+    out = []
+    for s in rows:
+        evidence = {}
+        if s.evidence:
+            try:
+                evidence = json.loads(s.evidence)
+            except (TypeError, ValueError):
+                evidence = {}
+        out.append({
             "stepIndex": s.step_index,
             "stepType": s.step_type,
             "action": s.action,
             "target": s.target,
             "result": s.result,
             "error": s.error,
+            "evidence": evidence,
             "screenshotBefore": _abs_output(s.screenshot_before),
             "screenshotAfter": _abs_output(s.screenshot_after),
-        }
-        for s in rows
-    ]
+        })
+    return out
 
 
 def _original_status_from_steps(steps: list[dict], fallback: str) -> str:

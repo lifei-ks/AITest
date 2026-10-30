@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.agent import case_review_agent
+from app.agent import case_review_agent, case_review_checks
 from app.analyzer.models import to_json_dict
 from app.common.errors import BizError
 from app.entity.models import Project, Requirement, RequirementCase, TestCase, TestPoint
@@ -89,38 +90,78 @@ def review_cases(session: Session, pid: str, case_ids: list[str]) -> dict:
         raise BizError(40025, f"单次最多质检 {MAX_REVIEW_CASES} 条用例")
 
     client = settings_service.get_text_client()
-    facts_cache: dict[str, tuple] = {}
+    facts_cache: dict[tuple[str, str | None], tuple] = {}
+    peer_rows = list(
+        session.scalars(
+            select(TestCase)
+            .where(TestCase.project_id == pid)
+            .order_by(TestCase.updated_at.desc())
+            .limit(200)
+        )
+    )
+    peer_cases = [case_to_dict(row) for row in peer_rows]
 
     results = []
     for cid in ids:
         tc = _case_or_404(session, pid, cid)
         case = case_to_dict(tc)
         requirement, point = _requirement_point(session, cid)
-        key = requirement.id if requirement else "__project__"
+        # 必须按测试点缓存：同一需求下不同测试点的字段和预期不同。
+        key = (requirement.id if requirement else "__project__", point.id if point else None)
         if key not in facts_cache:
             facts_cache[key] = _source_facts(session, pid, requirement, point)
         facts, _backend, _frontend, _machines = facts_cache[key]
         case["requirement"] = facts["requirement"]
         case["testPoint"] = facts["testPoint"]
 
-        if not client.available():
-            results.append(_unavailable_result(case, LlmUnavailable("未配置 LLM_API_KEY"), client.model))
-            continue
-        try:
-            # 先释放只读事务，避免长 LLM 调用期间 MySQL 连接空闲超时
-            session.commit()
-            review = case_review_agent.review_case(client, case, facts)
-            results.append({
-                "caseId": cid,
-                "title": case.get("title"),
-                **review,
-                "model": client.model,
-            })
-        except LlmUnavailable as exc:
-            results.append(_unavailable_result(case, exc, client.model))
+        # 先跑确定性检查，LLM 不可用时也能给出客观结论。
+        checks = case_review_checks.review_case_steps(case, facts, peers=peer_cases)
+        llm_review = None
+        llm_error = ""
+        if client.available():
+            try:
+                # 先释放只读事务，避免长 LLM 调用期间 MySQL 连接空闲超时
+                session.commit()
+                llm_review = case_review_agent.review_case(
+                    client,
+                    case,
+                    facts,
+                    deterministic=checks,
+                )
+            except LlmUnavailable as exc:
+                llm_error = str(exc)
+        merged = case_review_checks.merge_review(checks, llm_review)
+        tc.last_review_verdict = merged["verdict"]
+        tc.last_review_score = merged["score"]
+        tc.last_reviewed_at = datetime.now(timezone.utc)
+        tc.last_review_issues = json.dumps(
+            {
+                "reason": merged["reason"],
+                "issues": merged["issues"],
+                "stepResults": merged["stepResults"],
+            },
+            ensure_ascii=False,
+        )
+        session.add(tc)
+        session.flush()
+        results.append({
+            "caseId": cid,
+            "title": case.get("title"),
+            "verdict": merged["verdict"],
+            "reason": merged["reason"],
+            "issues": merged["issues"],
+            "stepResults": merged["stepResults"],
+            "qualityScore": merged["score"],
+            "qualityBreakdown": merged["qualityBreakdown"],
+            "duplicateCandidates": merged.get("duplicateCandidates") or [],
+            "deterministicVerdict": checks["verdict"],
+            "llmAvailable": bool(llm_review),
+            "llmError": llm_error,
+            "model": client.model if llm_review else "",
+        })
 
-    reviewed = sum(1 for item in results if item["verdict"] != "unavailable")
-    problems = sum(1 for item in results if item["verdict"] in ("suspect", "fail"))
+    reviewed = len(results)
+    problems = sum(1 for item in results if item["verdict"] in ("revise", "reject"))
     return {
         "total": len(results),
         "reviewed": reviewed,

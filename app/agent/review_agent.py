@@ -11,6 +11,7 @@ import base64
 import logging
 from pathlib import Path
 
+from app.config import get_settings
 from app.llm.client import LlmClient, LlmUnavailable
 from app.service import settings_service
 
@@ -21,6 +22,7 @@ VERDICT_SUSPECT = "suspect"
 VERDICT_UNAVAILABLE = "unavailable"
 
 MAX_IMAGES = 6
+MAX_IMAGES_EXTENDED = 12
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
 
 
@@ -33,13 +35,24 @@ def _vision_client() -> LlmClient:
     return settings_service.get_vision_client()
 
 
-def _pick_images(steps: list[dict], max_images: int = MAX_IMAGES) -> list[dict]:
+def _image_limit(steps: list[dict], extended: bool = False) -> int:
+    settings = get_settings()
+    limit = max(1, int(settings.vision_max_images or MAX_IMAGES))
+    if any(step.get("result") != "passed" for step in steps):
+        limit = max(limit, int(settings.vision_max_images_failed or limit))
+    if extended:
+        limit = max(limit, MAX_IMAGES_EXTENDED)
+    return limit
+
+
+def _pick_images(steps: list[dict], max_images: int | None = None) -> list[dict]:
     """挑选关键截图：失败步骤（前/后）→ 最后一步 → 断言步骤 → 第一步，最多 6 张。"""
+    limit = max_images if max_images is not None else _image_limit(steps)
     picked: list[dict] = []
     seen: set[str] = set()
 
     def add(path: str | None, label: str, step_index: int | None = None) -> None:
-        if not path or len(picked) >= max_images or path in seen:
+        if not path or len(picked) >= limit or path in seen:
             return
         p = Path(path)
         try:
@@ -79,6 +92,23 @@ def _steps_text(steps: list[dict]) -> str:
             line += f" 目标：{s.get('target')}"
         if s.get("selectorUsed"):
             line += f" 执行证据：{s.get('selectorUsed')}"
+        evidence = s.get("evidence") or {}
+        if evidence:
+            bits: list[str] = []
+            if evidence.get("inputValueLength") is not None:
+                bits.append(f"输入长度：{evidence.get('inputValueLength')}")
+            if evidence.get("actualValueLength") is not None:
+                bits.append(f"DOM实际长度：{evidence.get('actualValueLength')}")
+            if evidence.get("valueMatch") is not None:
+                bits.append(f"值一致：{evidence.get('valueMatch')}")
+            if evidence.get("sensitive"):
+                bits.append("敏感字段：未记录明文")
+            if evidence.get("actualValuePreview"):
+                bits.append(f"值预览：{evidence.get('actualValuePreview')}")
+            if evidence.get("evidenceError"):
+                bits.append(f"证据采集失败：{evidence.get('evidenceError')}")
+            if bits:
+                line += " " + "；".join(bits)
         if s.get("error"):
             line += f" 错误：{s.get('error')}"
         lines.append(line)
@@ -112,6 +142,8 @@ def _build_prompt(case: dict, steps: list[dict], target_url: str, images: list[d
 5. 若截图不足以证明其他预期结果（例如关键结果没截到、图片模糊），也判 suspect，不要放过。
 6. 只有截图明确展示了预期结果（文案、列表数据、状态变化等）才判 ok。
 7. 不要因为步骤结果写着 passed 就直接判 ok，必须自己看截图。
+8. 输入框只显示可视区域，长文本被截断是正常现象。若步骤记录提供「输入长度 / DOM实际长度 / 值一致」，以 DOM 证据为准，不要因为截图中输入框只显示部分字符而判 suspect；只有值一致=false，或校验提示、页面状态与预期不符时，才判 suspect。
+9. 只根据提供的截图判断；没有提供截图的步骤，不要仅因“没有看到”就判 suspect；但关键断言步骤或失败步骤没有截图时，应判 suspect。
 
 确定性断言证据的补充规则：
 - 若步骤记录包含「断言证据：文本锚点命中」或「断言证据：URL 命中」，说明 Playwright 已做过
@@ -261,24 +293,14 @@ def _normalize_verdict(
     return verdict, "；".join(reasons) or None
 
 
-def review_execution(case: dict, steps: list[dict], target_url: str) -> dict | None:
-    """返回审核结果；未配置视觉模型时返回 None（不审核）。"""
-    client = _vision_client()
-    if not client.available():
-        return None
-
-    model = client.model
-    images = _pick_images(steps)
-    if not images:
-        return {
-            "verdict": VERDICT_UNAVAILABLE,
-            "reason": "没有可用的截图，无法进行 AI 审核",
-            "model": model,
-            "imageCount": 0,
-            "imageReviews": [],
-            "issues": [],
-        }
-
+def _review_batch(
+    client: LlmClient,
+    case: dict,
+    steps: list[dict],
+    target_url: str,
+    images: list[dict],
+    model: str,
+) -> dict:
     prompt = _build_prompt(case, steps, target_url, images)
     content: list[dict] = [{"type": "text", "text": prompt}]
     for img in images:
@@ -296,6 +318,18 @@ def review_execution(case: dict, steps: list[dict], target_url: str) -> dict | N
             }
         )
 
+    reviewed_steps = sorted({
+        int(img["stepIndex"])
+        for img in images
+        if img.get("stepIndex") is not None
+    })
+    meta = {
+        "reviewPasses": 1,
+        "totalSteps": len(steps),
+        "reviewedSteps": reviewed_steps,
+        "imageCoverage": f"{len(reviewed_steps)}/{len(steps)}",
+    }
+
     try:
         data = client.chat_json(
             [{"role": "user", "content": content}],
@@ -311,6 +345,7 @@ def review_execution(case: dict, steps: list[dict], target_url: str) -> dict | N
             "imageCount": len(images),
             "imageReviews": [],
             "issues": [],
+            **meta,
         }
 
     if not isinstance(data, dict):
@@ -321,6 +356,7 @@ def review_execution(case: dict, steps: list[dict], target_url: str) -> dict | N
             "imageCount": len(images),
             "imageReviews": [],
             "issues": [],
+            **meta,
         }
 
     image_reviews = _parse_image_reviews(data.get("images"), images)
@@ -344,4 +380,63 @@ def review_execution(case: dict, steps: list[dict], target_url: str) -> dict | N
         "imageCount": len(images),
         "imageReviews": image_reviews,
         "issues": issues,
+        **meta,
     }
+
+
+def _is_evidence_suspect(result: dict) -> bool:
+    """没有具体问题、也没有可疑图片，只是因为证据不足判 suspect。"""
+    return (
+        result.get("verdict") == VERDICT_SUSPECT
+        and not result.get("issues")
+        and not any(
+            item.get("verdict") == VERDICT_SUSPECT
+            for item in result.get("imageReviews") or []
+        )
+    )
+
+
+def review_execution(case: dict, steps: list[dict], target_url: str) -> dict | None:
+    """返回审核结果；未配置视觉模型时返回 None（不审核）。"""
+    client = _vision_client()
+    if not client.available():
+        return None
+
+    model = client.model
+    all_images = _pick_images(steps, max_images=999)
+    if not all_images:
+        return {
+            "verdict": VERDICT_UNAVAILABLE,
+            "reason": "没有可用的截图，无法进行 AI 审核",
+            "model": model,
+            "imageCount": 0,
+            "imageReviews": [],
+            "issues": [],
+            "reviewPasses": 0,
+            "totalSteps": len(steps),
+            "reviewedSteps": [],
+            "imageCoverage": f"0/{len(steps)}",
+        }
+
+    limit = min(_image_limit(steps), len(all_images))
+    images = all_images[:limit]
+    result = _review_batch(client, case, steps, target_url, images, model)
+
+    settings = get_settings()
+    if (
+        settings.vision_two_pass_review
+        and _is_evidence_suspect(result)
+        and len(all_images) > len(images)
+    ):
+        extended_limit = min(_image_limit(steps, extended=True), len(all_images))
+        if extended_limit > len(images):
+            extended = _review_batch(
+                client, case, steps, target_url, all_images[:extended_limit], model
+            )
+            extended["reviewPasses"] = 2
+            extended["reason"] = (
+                (extended.get("reason") or "") + "；补充截图后复核"
+            )[:2000]
+            return extended
+
+    return result

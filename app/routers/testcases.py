@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.common.response import ok
 from app.database import SessionLocal
+from app.dto.projects import CamelModel
 from app.service import case_review_service
 from app.service import testcase_service
 
@@ -26,7 +27,7 @@ def get_session() -> Session:
         session.close()
 
 
-class TestCasePayload(BaseModel):
+class TestCasePayload(CamelModel):
     title: str | None = None
     module: str | None = None
     type: str | None = None
@@ -164,6 +165,6 @@ def rollback(pid: str, cid: str, vid: str, session: Session = Depends(get_sessio
 @router.post("/{pid}/testcases/{cid}/review")
 def review(pid: str, cid: str, session: Session = Depends(get_session)):
     tc = testcase_service._get_or_404(session, cid)
-    testcase_service._rerun_gate(tc)
+    testcase_service._rerun_gate(tc, session)
     session.flush()
     return ok({"qualityScore": tc.quality_score, "lintIssues": __import__("json").loads(tc.lint_issues) if tc.lint_issues else []})

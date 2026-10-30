@@ -68,6 +68,68 @@ def get_engine() -> Engine:
     return _engine
 
 
+def ensure_schema_compat(engine: Engine) -> None:
+    """为已存在的 SQLite 库补齐新增列。
+
+    create_all 只会创建缺失的表，不会给已有表加列；MySQL 环境走
+    migrations/mysql 下的显式 DDL。这里只处理默认的本地 SQLite 库。
+    """
+    if engine.dialect.name != "sqlite":
+        return
+    with engine.begin() as conn:
+        case_columns = {
+            row[1]
+            for row in conn.exec_driver_sql("PRAGMA table_info(test_cases)").fetchall()
+        }
+        if case_columns:
+            if "quality_breakdown" not in case_columns:
+                conn.exec_driver_sql(
+                    "ALTER TABLE test_cases ADD COLUMN quality_breakdown TEXT"
+                )
+            if "scenario_key" not in case_columns:
+                conn.exec_driver_sql(
+                    "ALTER TABLE test_cases ADD COLUMN scenario_key VARCHAR(64)"
+                )
+            if "last_review_verdict" not in case_columns:
+                conn.exec_driver_sql(
+                    "ALTER TABLE test_cases ADD COLUMN last_review_verdict VARCHAR(20)"
+                )
+            if "last_review_score" not in case_columns:
+                conn.exec_driver_sql(
+                    "ALTER TABLE test_cases ADD COLUMN last_review_score INTEGER"
+                )
+            if "last_reviewed_at" not in case_columns:
+                conn.exec_driver_sql(
+                    "ALTER TABLE test_cases ADD COLUMN last_reviewed_at DATETIME"
+                )
+            if "last_review_issues" not in case_columns:
+                conn.exec_driver_sql(
+                    "ALTER TABLE test_cases ADD COLUMN last_review_issues TEXT"
+                )
+            conn.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_test_cases_scenario_key "
+                "ON test_cases (scenario_key)"
+            )
+
+        step_columns = {
+            row[1]
+            for row in conn.exec_driver_sql("PRAGMA table_info(execution_steps)").fetchall()
+        }
+        if step_columns and "evidence" not in step_columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE execution_steps ADD COLUMN evidence TEXT"
+            )
+
+        review_columns = {
+            row[1]
+            for row in conn.exec_driver_sql("PRAGMA table_info(execution_reviews)").fetchall()
+        }
+        if review_columns and "review_meta" not in review_columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE execution_reviews ADD COLUMN review_meta TEXT"
+            )
+
+
 @contextmanager
 def session_scope() -> Iterator[Session]:
     """事务边界：with 块内正常返回即 commit，抛异常即 rollback。"""

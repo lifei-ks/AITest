@@ -6,9 +6,11 @@
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 from pathlib import Path
+from urllib.parse import urlparse
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
@@ -19,6 +21,10 @@ logger = logging.getLogger(__name__)
 # 引号锚点：中文角括号「」『』 / 弯引号 / 英文引号
 QUOTE_ANCHOR_RE = re.compile(r"[\u300c\u300e\u201c\u2018\"']([^\u300d\u300f\u201d\u2019\"']+)[\u300d\u300f\u201d\u2019\"']")
 REFRESH_RE = re.compile(r"刷新页面|刷新浏览器|reload", re.IGNORECASE)
+# 断言里的 URL 路径：必须是以字母/下划线/花括号开头的路由，
+# 避免把“20/21 字符”里的 /21 误判成 URL。
+URL_HINT_RE = re.compile(r"URL|跳转|路由|页面地址", re.IGNORECASE)
+URL_PATH_RE = re.compile(r"(?<![\w])/(?=[A-Za-z_{])[\w/{}.-]+")
 # 运行时变量：${name} / ${name+1} / ${name-1}
 VARIABLE_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?:([+-])(\d+))?\}")
 VARIABLE_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -45,6 +51,30 @@ def _resolve_variables(value, variables: dict[str, str]) -> str:
         return str(base + number if op == "+" else base - number)
 
     return VARIABLE_RE.sub(_repl, text)
+
+
+def _input_evidence(expected: str, actual: str, sensitive: bool = False) -> dict:
+    """把输入框真实值做成可核对证据，避免 AI 从截图判断长文本是否完整。"""
+    expected = str(expected or "")
+    actual = str(actual or "")
+    if sensitive:
+        return {
+            "inputValueLength": len(expected),
+            "actualValueLength": len(actual),
+            "valueMatch": actual == expected,
+            "sensitive": True,
+        }
+    preview = actual.replace("\n", " ").replace("\r", " ")
+    if len(preview) > 40:
+        preview = preview[:20] + "..." + preview[-20:]
+    return {
+        "inputValueLength": len(expected),
+        "actualValueLength": len(actual),
+        "inputValueHash": hashlib.sha256(expected.encode("utf-8")).hexdigest(),
+        "actualValueHash": hashlib.sha256(actual.encode("utf-8")).hexdigest(),
+        "valueMatch": actual == expected,
+        "actualValuePreview": preview,
+    }
 
 
 def _selector_for(step: dict) -> str | None:
@@ -120,22 +150,61 @@ def _find_locator(page, step: dict):
 
 
 def _do_assert(page, expected: str) -> tuple[bool, str, str]:
-    """三层断言（6.3.4）：URL → 引号锚点文本 → 诚实 skipped。返回 (result, status, detail)。"""
-    # 第 1 层 URL 断言
-    if re.search(r"URL|跳转|路由|页面地址|/[\w/]+", expected):
-        path_m = re.search(r"(/[\w/{}]+)", expected)
-        if path_m and path_m.group(1) in page.url:
-            return True, "passed", f"URL 命中: {path_m.group(1)}"
-    # 第 2 层 DOM 文本断言：引号锚点
+    """分层断言（6.3.4）：URL 和文案锚点都检查，全部满足才 passed。
+
+    同一句 expected 同时包含 URL 和文案时，不能因为 URL 先命中就跳过文案；
+    只有所有可验证维度都通过才返回 passed，否则 failed；没有任何锚点才 skipped。
+    """
+    expected = str(expected or "")
+    path_match = URL_PATH_RE.search(expected)
+    path = path_match.group(0) if path_match else ""
+    url_required = bool(path)
     anchors = QUOTE_ANCHOR_RE.findall(expected)
+
+    url_ok = True
+    url_detail = ""
+    if url_required:
+        url_ok = _url_path_matches(path, page.url)
+        url_detail = (
+            f"URL 命中: {path}"
+            if url_ok
+            else f"URL 未命中: {path}（当前 {urlparse(page.url).path}）"
+        )
+
+    anchors_ok = True
+    anchor_detail = ""
     if anchors:
         text = page.inner_text("body")
-        missing = [a for a in anchors if a not in text]
-        if not missing:
-            return True, "passed", f"文本锚点命中: {anchors}"
-        return False, "failed", f"文本锚点缺失: {missing}"
-    # 第 3 层 诚实 skipped
+        missing = [anchor for anchor in anchors if anchor not in text]
+        anchors_ok = not missing
+        anchor_detail = (
+            f"文本锚点命中: {anchors}"
+            if anchors_ok
+            else f"文本锚点缺失: {missing}"
+        )
+
+    if url_required and not url_ok:
+        return False, "failed", url_detail
+    if anchors and not anchors_ok:
+        return False, "failed", anchor_detail
+    if url_required and anchors:
+        return True, "passed", f"{url_detail}；{anchor_detail}"
+    if url_required:
+        return True, "passed", url_detail
+    if anchors:
+        return True, "passed", anchor_detail
+    if URL_HINT_RE.search(expected):
+        return False, "skipped", "包含 URL 提示但缺少可校验路径或文案锚点"
     return False, "skipped", "无可验证的断言锚点"
+
+
+def _url_path_matches(expected_path: str, current_url: str) -> bool:
+    """按路径匹配，不做简单子串匹配；支持 /orders/{id} 这类占位路径。"""
+    current_path = (urlparse(current_url).path or "/").rstrip("/") or "/"
+    expected = (expected_path or "/").rstrip("/") or "/"
+    parts = re.split(r"\{[^/{}]+\}", expected)
+    pattern = r"[^/]+".join(re.escape(part) for part in parts)
+    return re.fullmatch(pattern, current_path) is not None
 
 
 def _refresh_requested(step: dict) -> bool:
@@ -211,6 +280,7 @@ def execute_case(case: dict, target_url: str, output_dir: str, mode: str = "prog
                 reload_evidence = None
                 assertion_detail = None
                 capture_detail = None
+                step_evidence = None
                 try:
                     if stype == "ui_action" and (step.get("uiSelector") or {}).get("type") == "route":
                         route = step["uiSelector"]["value"]
@@ -236,7 +306,26 @@ def execute_case(case: dict, target_url: str, output_dir: str, mode: str = "prog
                         loc, attempted = _find_locator(page, step)
                         if not loc:
                             raise _StepError("SELECTOR_NOT_FOUND", f"输入框未找到，尝试链: {attempted}")
-                        loc.fill(_resolve_variables(step["inputValue"], variables))
+                        expected_value = _resolve_variables(step["inputValue"], variables)
+                        loc.fill(expected_value)
+                        try:
+                            sensitive_text = (
+                                f"{step.get('target') or ''} {step.get('action') or ''} "
+                                f"{(step.get('uiSelector') or {}).get('value') or ''}"
+                            ).lower()
+                            sensitive = any(
+                                word in sensitive_text
+                                for word in ("密码", "password", "pwd")
+                            )
+                            step_evidence = _input_evidence(
+                                expected_value, loc.input_value(), sensitive=sensitive
+                            )
+                        except Exception as exc:  # noqa: BLE001 - 证据采集失败不阻断执行
+                            step_evidence = {
+                                "inputValueLength": len(str(expected_value)),
+                                "valueMatch": None,
+                                "evidenceError": str(exc)[:200],
+                            }
                     elif stype == "capture":
                         variable = str(step.get("variable") or "").strip()
                         pattern = str(step.get("pattern") or "").strip()
@@ -316,7 +405,8 @@ def execute_case(case: dict, target_url: str, output_dir: str, mode: str = "prog
                 step_results.append({
                     "stepIndex": idx, "stepType": stype, "action": action_for_record,
                     "target": target_for_record, "selectorUsed": selector_for_record,
-                    "result": result, "screenshotBefore": before, "screenshotAfter": after, "error": error,
+                    "result": result, "screenshotBefore": before, "screenshotAfter": after,
+                    "error": error, "evidence": step_evidence or {},
                 })
                 # 失败即停（不继续无意义步骤）
                 if result == "failed":

@@ -28,6 +28,14 @@ class Settings(BaseSettings):
     # 执行证据输出目录
     output_dir: str = str(BASE_DIR / "outputs")
 
+    # 静态分析引擎：ast（默认，失败自动回退 regex） / regex
+    analyzer_engine: str = "ast"
+
+    # 视觉审核图片预算：普通场景默认 6 张，有失败步骤时放宽
+    vision_max_images: int = 6
+    vision_max_images_failed: int = 10
+    vision_two_pass_review: bool = True
+
     # 文本 LLM（需求测试点/用例措辞）
     llm_api_key: str = ""
     llm_base_url: str = ""

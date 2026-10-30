@@ -70,6 +70,50 @@ def test_update_creates_version_and_reruns_gate():
     assert len(versions) >= 1
 
 
+def test_update_accepts_camel_case_expected_and_structured_steps():
+    """前端用 camelCase 提交，预期和结构化步骤必须真正落库。"""
+    pid = _pid()
+    r = client.get(f"/api/projects/{pid}/testcases", params={"pageSize": 1}).json()["data"]
+    cid = r["items"][0]["id"]
+    steps = [
+        {
+            "order": 1,
+            "type": "ui_action",
+            "action": "打开订单列表",
+            "target": "订单列表",
+            "uiSelector": {"type": "route", "value": "/orders"},
+            "expected": "",
+            "inputValue": "",
+        },
+        {
+            "order": 2,
+            "type": "state_assert",
+            "action": "验证更新后的预期",
+            "target": "",
+            "uiSelector": {"type": "text", "value": "「更新后的预期」"},
+            "expected": "「更新后的预期」",
+            "inputValue": "",
+        },
+    ]
+    resp = client.put(
+        f"/api/projects/{pid}/testcases/{cid}",
+        json={"expectedResults": ["「更新后的预期」"], "structuredSteps": steps},
+    ).json()
+    assert resp["code"] == 0
+
+    detail = client.get(f"/api/projects/{pid}/testcases/{cid}").json()["data"]
+    assert detail["expectedResults"] == ["「更新后的预期」"]
+    assert detail["structuredSteps"] == steps
+
+
+def test_generated_case_has_quality_breakdown_and_scenario_key():
+    pid = _pid()
+    r = client.get(f"/api/projects/{pid}/testcases", params={"pageSize": 1}).json()["data"]
+    item = r["items"][0]
+    assert item["qualityBreakdown"]["dimensions"]
+    assert item["scenarioKey"]
+
+
 def test_rollback():
     pid = _pid()
     r = client.get(f"/api/projects/{pid}/testcases", params={"pageSize": 1}).json()["data"]

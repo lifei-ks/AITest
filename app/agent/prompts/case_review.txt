@@ -3,6 +3,11 @@
 评审输入：
 {{REVIEW_PAYLOAD}}
 
+输入中的 deterministicChecks 是确定性检查结果，属于事实，不得否定或忽略：
+- deterministicChecks.blocking 非空时，verdict 必须是 fail。
+- deterministicChecks 已经指出的问题不要重复报告；你只补充它没有覆盖的语义问题。
+- deterministicChecks 中 status=pass 的检查，不要无依据地改判为失败。
+
 必须逐项检查：
 1. 用例是否完整覆盖测试点意图；不得偏离需求或漏掉关键前置条件。
 2. 只能使用事实中的页面路由、字段 placeholder/label、按钮/文案、接口、状态和业务规则；编造定位器是 blocker。
@@ -11,11 +16,18 @@
 5. 正例/反例/边界/状态流转的测试数据与预期结果必须匹配需求与源码约束。
 6. 步骤顺序必须符合真实页面跳转和状态前置条件。
 7. 问题必须给出证据，例如页面路由、字段、placeholder、业务规则、状态转换或需求摘录。
+8. 按结构化步骤逐步核对：每一步的页面条件是否成立、参数是否填到正确字段、变量是否先定义后使用、断言是否对应当前操作的结果。
 
 verdict 规则：
 - ok：没有 blocker/warning。
 - suspect：存在 warning，或某项无法基于提供事实确认。
 - fail：存在 blocker，或用例无法执行/会错误执行。
+
+stepResults 规则：
+- 每个有问题的步骤输出一条 stepResults；没有问题的步骤可以省略。
+- stepIndex 使用 structuredSteps 的 1-based 下标。
+- 同一问题只输出一次；如果与 deterministicChecks 的问题重复，跳过。
+- issue.code 尽量复用 deterministicChecks 中的 code，例如 FIELD_EXISTS、INPUT_VALUE、VARIABLE_UNDEFINED。
 
 只输出 JSON：
 {
@@ -28,6 +40,24 @@ verdict 规则：
       "problem": "具体问题",
       "suggestion": "可执行的修复建议",
       "evidence": "需求/源码事实依据"
+    }
+  ],
+  "stepResults": [
+    {
+      "stepIndex": 1,
+      "stepType": "ui_action|input|capture|state_assert",
+      "action": "步骤动作",
+      "verdict": "pass|warning|fail",
+      "issues": [
+        {
+          "code": "FIELD_EXISTS",
+          "severity": "blocker|warning|info",
+          "problem": "具体问题",
+          "reason": "为什么这是问题",
+          "suggestion": "可执行的修复建议",
+          "evidence": "需求/源码事实依据"
+        }
+      ]
     }
   ]
 }

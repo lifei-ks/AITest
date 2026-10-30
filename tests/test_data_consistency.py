@@ -77,7 +77,7 @@ def test_empty_generation_preserves_existing_cases(monkeypatch):
     monkeypatch.setattr(
         generation_service,
         "run_quality_gate",
-        lambda cases: GateResult(generated=len(cases), kept=[], dropped=len(cases), dropReasons={}),
+        lambda cases, **kwargs: GateResult(generated=len(cases), kept=[], dropped=len(cases), dropReasons={}),
     )
     result = generation_service.generate(pid, "rule", requirement_id=rid)
     assert result["kept"] == 0

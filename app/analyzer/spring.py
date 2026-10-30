@@ -63,12 +63,12 @@ NON_ENTITY_SUFFIXES = (
 
 def _extract_path_value(annotation_args: str) -> str | None:
     """从 @XxxMapping(...) 参数里提取 path/value。"""
-    # 直接字符串：@PostMapping("/create")
-    m = re.search(r'"([^"]+)"', annotation_args)
-    if m:
-        return m.group(1)
     # value="/x" 或 path="/x"
     m = re.search(r"\b(?:value|path)\s*=\s*\"([^\"]+)\"", annotation_args)
+    if m:
+        return m.group(1)
+    # 直接字符串：@PostMapping("/create")
+    m = re.search(r'"([^"]+)"', annotation_args)
     if m:
         return m.group(1)
     return None
@@ -180,11 +180,14 @@ def _parse_method_params(signature: str) -> list[dict]:
         else:
             source = "unknown"
         args_text = " ".join(str(args or "") for args in ann_names.values()).replace(" ", "").lower()
-        required = (
-            source in ("request_body", "path_variable")
-            or any(name in ann_names for name in ("notblank", "notnull", "notempty"))
-            or (source == "request_param" and "required=false" not in args_text)
-        )
+        # defaultValue 隐含 required=false，与 AST 解析保持一致
+        optional = "required=false" in args_text or "defaultvalue=" in args_text
+        if optional:
+            required = False
+        elif source in ("request_body", "path_variable", "request_param"):
+            required = True
+        else:
+            required = any(name in ann_names for name in ("notblank", "notnull", "notempty"))
         constraints = []
         for name, args in annotations:
             if name.lower() in PARAM_CONSTRAINT_NAMES:

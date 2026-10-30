@@ -29,6 +29,34 @@ def test_parse_review_adds_issue_when_verdict_is_fail_without_detail():
     assert review["issues"]
 
 
+def test_parse_review_keeps_step_results():
+    review = case_review_agent.parse_review({
+        "verdict": "suspect",
+        "reason": "第3步参数不匹配",
+        "issues": [],
+        "stepResults": [
+            {
+                "stepIndex": 3,
+                "stepType": "input",
+                "action": "输入收货人",
+                "verdict": "fail",
+                "issues": [
+                    {
+                        "code": "VALUE_CONSTRAINT",
+                        "severity": "blocker",
+                        "problem": "输入超过字段上限",
+                        "reason": "receiverName size=20",
+                        "evidence": "FieldConstraint",
+                        "suggestion": "缩短输入值",
+                    }
+                ],
+            }
+        ],
+    })
+    assert review["stepResults"][0]["stepIndex"] == 3
+    assert review["stepResults"][0]["issues"][0]["code"] == "VALUE_CONSTRAINT"
+
+
 def test_normalize_patch_keeps_only_supported_fields():
     patch = _normalize_patch({
         "title": " 修复后的标题 ",

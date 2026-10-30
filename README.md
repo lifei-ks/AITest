@@ -393,6 +393,15 @@ LLM 不可用、输出非法或模型能力不匹配时，显式降级到规则�
 
 ---
 
+## 延伸阅读
+
+- [架构学习与面试讲解指南](docs/ARCHITECTURE-INTERVIEW-GUIDE.md)：两分钟介绍、架构图、关键设计、真实故障复盘和高频追问。
+- [简历项目面试问答](docs/RESUME-INTERVIEW-QA.md)：按简历四段描述准备的追问答案、深挖口径和红线提醒。
+- [代码审查报告（2026-10-26）](docs/CODE-REVIEW-2026-10-26.md)：按 P0/P1/P2 整理的已知问题和修复建议。
+- [多 Agent 工作流设计](docs/MULTI_AGENT_WORKFLOW.md)：Pipeline 阶段、数据契约和失败处理。
+
+---
+
 ## 测试
 
 ```bash

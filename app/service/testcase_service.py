@@ -9,7 +9,7 @@ import logging
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.agent.quality_gate import run_quality_gate
+from app.agent.quality_gate import run_quality_gate, scenario_signature
 from app.agent.test_generator_agent import GeneratedCase
 from app.common.errors import BizError
 from app.common.execution_enums import CASE_EXECUTION_STATUSES
@@ -28,8 +28,14 @@ def _get_or_404(session: Session, cid: str) -> TestCase:
     return tc
 
 
-def _orm_to_case(tc: TestCase) -> GeneratedCase:
+def _orm_to_case(tc: TestCase, session: Session | None = None) -> GeneratedCase:
     """ORM → GeneratedCase（供质量闸重跑）。"""
+    test_point_id = None
+    if session is not None:
+        mapping = session.scalars(
+            select(RequirementCase).where(RequirementCase.test_case_id == tc.id)
+        ).first()
+        test_point_id = mapping.test_point_id if mapping else None
     return GeneratedCase(
         title=tc.title,
         module=tc.module,
@@ -43,6 +49,7 @@ def _orm_to_case(tc: TestCase) -> GeneratedCase:
         coverage_refs=json.loads(tc.coverage_refs) if tc.coverage_refs else {},
         source=tc.source,
         confidence=tc.confidence,
+        test_point_id=test_point_id,
     )
 
 
@@ -148,13 +155,20 @@ def _apply_payload(tc: TestCase, payload: dict) -> None:
         tc.execution_status = payload["execution_status"]
 
 
-def _rerun_gate(tc: TestCase) -> None:
-    case = _orm_to_case(tc)
+def _rerun_gate(tc: TestCase, session: Session | None = None) -> None:
+    case = _orm_to_case(tc, session)
     gate = run_quality_gate([case])
     if not gate.kept:
-        raise BizError(40011, "用例未通过质量闸（无预期结果或得分过低）")
-    tc.quality_score = gate.kept[0].quality_score
-    tc.lint_issues = json.dumps(gate.kept[0].lint_issues, ensure_ascii=False)
+        raise BizError(40011, "用例未通过质量闸（缺少预期结果、结构化步骤或断言）")
+    kept = gate.kept[0]
+    tc.quality_score = kept.quality_score
+    tc.lint_issues = json.dumps(kept.lint_issues, ensure_ascii=False)
+    tc.quality_breakdown = json.dumps(
+        getattr(kept, "quality_breakdown", {}), ensure_ascii=False
+    )
+    tc.scenario_key = scenario_signature(kept)
+    if kept.quality_score < 40 and tc.execution_status == "not_run":
+        tc.execution_status = "needs_review"
 
 
 def create_testcase(session: Session, pid: str, payload: dict) -> TestCase:
@@ -174,7 +188,7 @@ def create_testcase(session: Session, pid: str, payload: dict) -> TestCase:
         confidence=payload.get("confidence", 1.0),
     )
     _apply_payload(tc, payload)
-    _rerun_gate(tc)
+    _rerun_gate(tc, session)
     session.add(tc)
     session.flush()
     return tc
@@ -196,7 +210,7 @@ def update_testcase(session: Session, cid: str, payload: dict, change_note: str 
         change_note=change_note,
     ))
     _apply_payload(tc, payload)
-    _rerun_gate(tc)
+    _rerun_gate(tc, session)
     session.flush()
     return tc
 
@@ -225,7 +239,7 @@ def rollback_version(session: Session, cid: str, vid: str) -> TestCase:
         raise BizError(40403, "版本不存在", http_status=404)
     snap = json.loads(version.snapshot)
     _apply_payload(tc, snap)
-    _rerun_gate(tc)
+    _rerun_gate(tc, session)
     # 回滚也产新版本（不回退版本号）
     max_v = session.scalar(select(func.max(TestCaseVersion.version)).where(TestCaseVersion.test_case_id == cid)) or 0
     session.add(TestCaseVersion(test_case_id=cid, version=max_v + 1, snapshot=json.dumps(snap, ensure_ascii=False), change_note=f"回滚到版本 {version.version}"))
@@ -251,7 +265,8 @@ def copy_to(session: Session, cids: list[str], target_project_id: str) -> int:
             preconditions=src.preconditions, steps=src.steps, expected_results=src.expected_results,
             structured_steps=src.structured_steps, test_data=src.test_data, coverage_refs=src.coverage_refs,
             source=src.source, confidence=src.confidence, quality_score=src.quality_score,
-            lint_issues=src.lint_issues, execution_status="not_run",
+            lint_issues=src.lint_issues, quality_breakdown=src.quality_breakdown,
+            scenario_key=scenario_signature(_orm_to_case(src, session)), execution_status="not_run",
         )
         session.add(tc)
         count += 1

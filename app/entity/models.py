@@ -99,6 +99,12 @@ class TestCase(Base):
     confidence: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
     quality_score: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
     lint_issues: Mapped[str | None] = mapped_column(Text, nullable=True)
+    quality_breakdown: Mapped[str | None] = mapped_column(Text, nullable=True)
+    scenario_key: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    last_review_verdict: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    last_review_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_reviewed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_review_issues: Mapped[str | None] = mapped_column(Text, nullable=True)
     # not_run / running / passed / failed / skipped / needs_review / cancelled
     execution_status: Mapped[str] = mapped_column(String(20), nullable=False, default="not_run")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
@@ -182,6 +188,8 @@ class ExecutionReview(Base):
     reviewer: Mapped[str | None] = mapped_column(String(20), nullable=True)
     reviewer_note: Mapped[str | None] = mapped_column(Text, nullable=True)
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # JSON：审核轮次、总步骤数、已审步骤、图片覆盖率
+    review_meta: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
 
 
@@ -238,6 +246,8 @@ class ExecutionStep(Base):
     screenshot_after: Mapped[str | None] = mapped_column(String(500), nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     duration_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # JSON：输入值长度/哈希/是否一致等执行证据，供 AI 审核使用
+    evidence: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class Requirement(Base):

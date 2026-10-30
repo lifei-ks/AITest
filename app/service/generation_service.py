@@ -16,6 +16,7 @@ from app.agent.quality_gate import (
     is_compound_expected,
     quoted_anchors,
     run_quality_gate,
+    scenario_signature,
     steps_have_multiple_inputs,
 )
 from app.agent import test_case_agent
@@ -201,6 +202,7 @@ def _save_case(
     requirement_id: str | None = None,
     test_point_id: str | None = None,
 ) -> TestCase:
+    quality_score = int(getattr(case, "quality_score", 100))
     tc = TestCase(
         id=_next_tc_id(session),
         project_seq=_next_project_seq(session, pid),
@@ -217,9 +219,13 @@ def _save_case(
         coverage_refs=json.dumps(case.coverage_refs, ensure_ascii=False),
         source=case.source,
         confidence=case.confidence,
-        quality_score=getattr(case, "quality_score", 100),
+        quality_score=quality_score,
         lint_issues=json.dumps(getattr(case, "lint_issues", []), ensure_ascii=False),
-        execution_status="not_run",
+        quality_breakdown=json.dumps(
+            getattr(case, "quality_breakdown", {}), ensure_ascii=False
+        ),
+        scenario_key=scenario_signature(case),
+        execution_status="needs_review" if quality_score < 40 else "not_run",
     )
     session.add(tc)
     if requirement_id:
@@ -266,6 +272,31 @@ def _clear_generated_for_requirement(session: Session, rid: str) -> None:
         session.query(RequirementCase).filter(RequirementCase.test_case_id.in_(generated)).delete(synchronize_session=False)
         session.query(TestCase).filter(TestCase.id.in_(generated)).delete(synchronize_session=False)
         session.flush()
+
+
+def _existing_scenario_keys(
+    session: Session,
+    pid: str,
+    requirement_id: str | None = None,
+    exclude_ids: list[str] | None = None,
+) -> set[str]:
+    """读取同一需求版本（或项目级）已有用例的场景签名，用于跨批次去重。"""
+    stmt = select(TestCase.scenario_key).where(
+        TestCase.project_id == pid,
+        TestCase.scenario_key.is_not(None),
+    )
+    mapped = select(RequirementCase.test_case_id)
+    if requirement_id:
+        stmt = stmt.where(
+            TestCase.id.in_(
+                mapped.where(RequirementCase.requirement_id == requirement_id)
+            )
+        )
+    else:
+        stmt = stmt.where(TestCase.id.not_in(mapped))
+    if exclude_ids:
+        stmt = stmt.where(TestCase.id.not_in(exclude_ids))
+    return {key for key in session.scalars(stmt) if key}
 
 
 def _as_text_list(value, limit: int | None = None) -> list[str]:
@@ -315,6 +346,12 @@ def case_to_dict(tc: TestCase) -> dict:
         "confidence": tc.confidence,
         "qualityScore": tc.quality_score,
         "lintIssues": json.loads(tc.lint_issues) if tc.lint_issues else [],
+        "qualityBreakdown": json.loads(tc.quality_breakdown) if tc.quality_breakdown else {},
+        "scenarioKey": tc.scenario_key,
+        "lastReviewVerdict": tc.last_review_verdict,
+        "lastReviewScore": tc.last_review_score,
+        "lastReviewedAt": to_utc_iso(tc.last_reviewed_at) if tc.last_reviewed_at else None,
+        "lastReviewIssues": json.loads(tc.last_review_issues) if tc.last_review_issues else {},
         "executionStatus": tc.execution_status,
         "executionStatusLabel": status_meta["label"],
         "executionStatusDescription": status_meta["description"],
@@ -484,9 +521,8 @@ def generate(
                 logger.info("用例已把固定总数改为运行时基线: %s", case.title)
             normalized_cases.append(case)
         cases = normalized_cases
-        gate = run_quality_gate(cases)
 
-        # 空结果不能删除旧用例：质量闸/动态改写全部淘汰时，旧用例仍是最有价值的产物。
+        # 先算出本次重新生成会替换掉的旧用例，跨批次去重时排除它们。
         existing_generated_ids: list[str] = []
         if requirement is not None:
             existing_generated_ids = list(
@@ -504,6 +540,23 @@ def generate(
                     )
                 )
             )
+        replaceable_ids = list(
+            session.scalars(
+                select(TestCase.id).where(
+                    TestCase.id.in_(existing_generated_ids),
+                    TestCase.source.in_(["rule", "ai"]),
+                )
+            )
+        ) if existing_generated_ids else []
+        existing_signatures = _existing_scenario_keys(
+            session,
+            pid,
+            requirement_id=requirement.id if requirement else None,
+            exclude_ids=replaceable_ids,
+        )
+        gate = run_quality_gate(cases, existing_signatures=existing_signatures)
+
+        # 空结果不能删除旧用例：质量闸/动态改写全部淘汰时，旧用例仍是最有价值的产物。
         preserved_existing = not gate.kept and bool(existing_generated_ids)
 
         if gate.kept:

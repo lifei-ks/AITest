@@ -1,6 +1,7 @@
 """执行路由：单条执行、批量执行、批次查询、证据文件访问。"""
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -293,7 +294,18 @@ def get_steps(eid: str, session: Session = Depends(get_session)):
     steps = list(session.scalars(select(ExecutionStep).where(ExecutionStep.execution_id == eid).order_by(ExecutionStep.step_index)))
     return ok([{"stepIndex": s.step_index, "stepType": s.step_type, "action": s.action, "target": s.target,
                 "selectorUsed": s.selector_used, "result": s.result, "screenshotBefore": s.screenshot_before,
-                "screenshotAfter": s.screenshot_after, "error": s.error} for s in steps])
+                "screenshotAfter": s.screenshot_after, "error": s.error,
+                "evidence": _step_evidence(s.evidence)} for s in steps])
+
+
+def _step_evidence(raw: str | None) -> dict:
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
 
 
 @router.get("/api/executions/{eid}/video")
